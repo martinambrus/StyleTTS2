@@ -2,7 +2,7 @@
 
 _pad = "$"
 _punctuation = ';:,.!?¡¿—…"«»“” '
-_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
+_letters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 _letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
 
 # Export all symbols:
@@ -12,10 +12,12 @@ dicts = {}
 for i in range(len((symbols))):
     dicts[symbols[i]] = i
 
+
 class TextCleaner:
     def __init__(self, dummy=None):
         self.word_index_dictionary = dicts
         print(len(dicts))
+
     def __call__(self, text):
         indexes = []
         for char in text:
