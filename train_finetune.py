@@ -368,9 +368,13 @@ def main(config_path):
             
             if gt.size(-1) < 80:
                 continue
-            
-            s = model.style_encoder(gt.unsqueeze(1))           
-            s_dur = model.predictor_encoder(gt.unsqueeze(1))
+
+            #s = model.style_encoder(gt.unsqueeze(1))
+            #s_dur = model.predictor_encoder(gt.unsqueeze(1))
+
+            # potential fix for multispeaker scenarios - https://github.com/yl4579/StyleTTS2/issues/243
+            s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
+            s_dur = model.predictor_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
                 
             with torch.no_grad():
                 F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
