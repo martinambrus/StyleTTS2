@@ -14,4 +14,9 @@ einops-exts
 tqdm
 typing
 typing-extensions
+noisereduce
+pandas
+tensorboard
+nvitop
+openai-whisper
 git+https://github.com/resemble-ai/monotonic_align.git
