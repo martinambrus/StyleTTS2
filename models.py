@@ -6,8 +6,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils import weight_norm, spectral_norm
 
-from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
+from Utils.ASR.models import build_asr_model
+from Utils.JDC.model import build_jdc_model_from_state_dict
 
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
 from Modules.diffusion.modules import Transformer1d, StyleTransformer1d
@@ -715,8 +715,26 @@ class DurationEncoder(nn.Module):
 def load_F0_models(path):
     # load F0 model
 
-    F0_model = JDCNet(num_class=1, seq_len=192)
-    params = torch.load(path, map_location="cpu")["net"]
+    state = torch.load(path, map_location="cpu")
+
+    if isinstance(state, dict):
+        if "model" in state:
+            params = state["model"]
+        elif "net" in state:
+            net_entry = state["net"]
+            if isinstance(net_entry, dict) and "model" in net_entry:
+                params = net_entry["model"]
+            else:
+                params = net_entry
+        else:
+            params = state
+    else:
+        params = state
+
+    if not isinstance(params, dict):
+        raise TypeError("Unexpected checkpoint format for pitch extractor")
+
+    F0_model = build_jdc_model_from_state_dict(params)
     F0_model.load_state_dict(params)
     _ = F0_model.train()
 
@@ -728,12 +746,42 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     def _load_config(path):
         with open(path) as f:
             config = yaml.safe_load(f)
-        model_config = config["model_params"]
+
+        model_config = dict(config.get("model_params", {}))
+        if "n_token" not in model_config:
+            raise KeyError(
+                "ASR model configuration is missing 'n_token'. "
+                "Please export the value from the training setup or include it in the config file."
+            )
+        model_config["multi_task_config"] = config.get("multi_task", {}) or {}
+        model_config["stabilization_config"] = config.get("stabilization", {}) or {}
+        model_config["memory_optimization_config"] = (
+            config.get("memory_optimizations", {}) or {}
+        )
+
         return model_config
 
     def _load_model(model_config, model_path):
-        model = ASRCNN(**model_config)
-        params = torch.load(model_path, map_location="cpu", weights_only=False)["model"]
+        state = torch.load(model_path, map_location="cpu", weights_only=False)
+
+        if isinstance(state, dict):
+            if "model" in state:
+                params = state["model"]
+            elif "net" in state:
+                net_entry = state["net"]
+                if isinstance(net_entry, dict) and "model" in net_entry:
+                    params = net_entry["model"]
+                else:
+                    params = net_entry
+            else:
+                params = state
+        else:
+            params = state
+
+        if not isinstance(params, dict):
+            raise TypeError("Unexpected checkpoint format for ASR model")
+
+        model = build_asr_model(model_config, params)
         model.load_state_dict(params)
         return model
 

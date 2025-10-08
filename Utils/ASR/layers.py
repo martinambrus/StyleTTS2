@@ -147,7 +147,8 @@ class LocationLayer(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, attention_rnn_dim, embedding_dim, attention_dim,
-                 attention_location_n_filters, attention_location_kernel_size):
+                 attention_location_n_filters, attention_location_kernel_size,
+                 attention_dropout=0.0):
         super(Attention, self).__init__()
         self.query_layer = LinearNorm(attention_rnn_dim, attention_dim,
                                       bias=False, w_init_gain='tanh')
@@ -158,6 +159,8 @@ class Attention(nn.Module):
                                             attention_location_kernel_size,
                                             attention_dim)
         self.score_mask_value = -float("inf")
+        self.attention_dropout_p = max(0.0, float(attention_dropout))
+        self._attention_dropout = nn.Dropout(p=self.attention_dropout_p) if self.attention_dropout_p > 0.0 else None
 
     def get_alignment_energies(self, query, processed_memory,
                                attention_weights_cat):
@@ -198,6 +201,12 @@ class Attention(nn.Module):
             alignment.data.masked_fill_(mask, self.score_mask_value)
 
         attention_weights = F.softmax(alignment, dim=1)
+
+        if self._attention_dropout is not None:
+            attention_weights = self._attention_dropout(attention_weights)
+            denom = attention_weights.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+            attention_weights = attention_weights / denom
+
         attention_context = torch.bmm(attention_weights.unsqueeze(1), memory)
         attention_context = attention_context.squeeze(1)
 
