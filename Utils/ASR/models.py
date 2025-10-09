@@ -609,6 +609,9 @@ class ASRCNN(nn.Module):
         optional_prefixes = list(self._optional_state_prefixes())
         optional_prefixes_set = set(optional_prefixes)
 
+        if self.enable_ctc_seq2seq_sharing:
+            optional_prefixes_set.discard("ctc_linear")
+
         def _has_prefix(prefix: str) -> bool:
             return any(key.startswith(prefix) for key in state_dict.keys())
 
