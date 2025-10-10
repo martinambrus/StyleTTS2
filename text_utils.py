@@ -1,9 +1,9 @@
 import os
 from typing import Mapping, Optional, Sequence
 
-from phoneme_dictionary import load_phoneme_dictionary
+from phoneme_dictionary import DEFAULT_DICTIONARY_PATH, load_phoneme_dictionary
 
-DEFAULT_DICT_PATH = os.path.join(os.path.dirname(__file__), "Data", "word_index_dict.txt")
+DEFAULT_DICT_PATH = DEFAULT_DICTIONARY_PATH
 
 
 class TextCleaner:

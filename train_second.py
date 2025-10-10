@@ -22,6 +22,8 @@ import shutil
 import traceback
 import torch.nn.functional as F
 
+from phoneme_dictionary import resolve_phoneme_dictionary_settings
+
 
 
 def _run_pitch_extractor(extractor, mel):
@@ -97,7 +99,7 @@ def main(config_path):
     log_interval = config.get('log_interval', 10)
     save_frequency = config.get('save_freq', 2)
 
-    data_params = config.get('data_params', None)
+    data_params = config.get('data_params') or {}
     sr = config['preprocess_params'].get('sr', 24000)
     train_path = data_params['train_data']
     val_path = data_params['val_data']
@@ -105,15 +107,17 @@ def main(config_path):
     min_length = data_params['min_length']
     OOD_data = data_params['OOD_data']
 
+    asr_config_path = config.get('ASR_config') or None
+    dictionary_source, dictionary_settings = resolve_phoneme_dictionary_settings(
+        data_params=data_params,
+        asr_config_path=asr_config_path,
+    )
+
     dataset_config = {}
-    phoneme_dict_path = data_params.get('phoneme_dict_path')
-    if phoneme_dict_path is None:
-        phoneme_dict_path = data_params.get('dict_path')
-    if phoneme_dict_path:
-        dataset_config['dict_path'] = phoneme_dict_path
-    phoneme_dict_cfg = data_params.get('phoneme_dictionary_config')
-    if phoneme_dict_cfg is not None:
-        dataset_config['dictionary_config'] = phoneme_dict_cfg
+    if dictionary_source is not None:
+        dataset_config['dict_path'] = dictionary_source
+    if dictionary_settings:
+        dataset_config['dictionary_config'] = dictionary_settings
 
     max_len = config.get('max_len', 200)
     
@@ -146,9 +150,14 @@ def main(config_path):
                                       dataset_config=dataset_config)
     
     # load pretrained ASR model
-    ASR_config = config.get('ASR_config', False)
+    ASR_config = asr_config_path
     ASR_path = config.get('ASR_path', False)
-    text_aligner = load_ASR_models(ASR_path, ASR_config)
+    text_aligner = load_ASR_models(
+        ASR_path,
+        ASR_config,
+        dictionary_path=dictionary_source,
+        dictionary_config=dictionary_settings,
+    )
     
     # load pretrained F0 model
     F0_path = config.get('F0_path', False)

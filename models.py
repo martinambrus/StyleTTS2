@@ -1,6 +1,8 @@
 #coding:utf-8
 import math
 
+from typing import Mapping, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -21,6 +23,12 @@ from Modules.discriminators import (
 
 from munch import Munch
 import yaml
+
+from phoneme_dictionary import (
+    DEFAULT_DICTIONARY_PATH,
+    load_phoneme_dictionary,
+    resolve_phoneme_dictionary_settings,
+)
 
 
 class LearnedDownSample(nn.Module):
@@ -789,7 +797,12 @@ def load_F0_models(path, config_path=None, use_ema=True):
     return F0_model
 
 
-def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
+def load_ASR_models(
+    ASR_MODEL_PATH,
+    ASR_MODEL_CONFIG,
+    dictionary_path=None,
+    dictionary_config=None,
+):
     if not ASR_MODEL_PATH:
         raise ValueError('A checkpoint path must be provided for the auxiliary ASR model.')
 
@@ -816,6 +829,41 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
             else:
                 merged[key] = value
         return merged
+
+    dictionary_overrides = {}
+    if dictionary_path is not None:
+        dictionary_overrides['phoneme_dict_path'] = dictionary_path
+    if dictionary_config:
+        dictionary_overrides['phoneme_dictionary_config'] = dictionary_config
+
+    dictionary_source, dictionary_settings = resolve_phoneme_dictionary_settings(
+        data_params=dictionary_overrides if dictionary_overrides else None,
+        asr_config_path=ASR_MODEL_CONFIG,
+        default_path=DEFAULT_DICTIONARY_PATH,
+    )
+    dictionary_settings = dict(dictionary_settings or {})
+
+    token_map = {}
+    dictionary_token_count: Optional[int] = None
+    max_dictionary_index: Optional[int] = None
+    dictionary_source_path: Optional[str] = None
+
+    if isinstance(dictionary_source, Mapping):
+        token_map = dict(dictionary_source)
+    else:
+        dictionary_source_path = dictionary_source or DEFAULT_DICTIONARY_PATH
+        try:
+            token_map = load_phoneme_dictionary(dictionary_source_path, config=dictionary_settings)
+        except FileNotFoundError as exc:
+            raise FileNotFoundError(
+                "Phoneme dictionary not found at "
+                f"'{dictionary_source_path}'. "
+                "Set 'phoneme_dict_path' in the StyleTTS2 configuration or ensure the file exists."
+            ) from exc
+
+    if token_map:
+        max_dictionary_index = max(int(idx) for idx in token_map.values())
+        dictionary_token_count = max_dictionary_index + 1
 
     config = {}
     if ASR_MODEL_CONFIG:
@@ -849,22 +897,31 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
             _cfg_get_nested(config_section, 'model_params', {}) or {},
         )
 
-    n_token = model_params.get('n_token')
-    if not isinstance(n_token, int) or n_token <= 0:
-        inferred = None
-        if isinstance(state_dict, dict):
-            for key in [
-                'asr_s2s.embedding.weight',
-                'embedding.weight',
-                'ctc_classifier.linear_layer.weight',
-                'ctc_linear.2.linear_layer.weight',
-            ]:
-                tensor = state_dict.get(key)
-                if isinstance(tensor, torch.Tensor):
-                    inferred = tensor.shape[0]
-                    break
-        if inferred is not None:
-            model_params['n_token'] = inferred
+    token_candidates = []
+    configured_tokens = model_params.get('n_token')
+    if isinstance(configured_tokens, int) and configured_tokens > 0:
+        token_candidates.append(int(configured_tokens))
+
+    inferred = None
+    if isinstance(state_dict, dict):
+        for key in [
+            'asr_s2s.embedding.weight',
+            'embedding.weight',
+            'ctc_classifier.linear_layer.weight',
+            'ctc_linear.2.linear_layer.weight',
+        ]:
+            tensor = state_dict.get(key)
+            if isinstance(tensor, torch.Tensor):
+                inferred = tensor.shape[0]
+                break
+    if inferred is not None:
+        token_candidates.append(int(inferred))
+
+    if dictionary_token_count is not None:
+        token_candidates.append(int(dictionary_token_count))
+
+    if token_candidates:
+        model_params['n_token'] = max(token_candidates)
 
     multi_task_config = _cfg_get_nested(config, 'multi_task', {}) or {}
     if isinstance(checkpoint.get('multi_task_config'), dict):
@@ -900,6 +957,21 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     if unexpected:
         print(f'[AuxiliaryASR] Unexpected parameters ignored during load: {sorted(unexpected)}')
     _ = model.train()
+
+    if token_map:
+        model.phoneme_dictionary = dict(token_map)
+        model.phoneme_dictionary_config = dict(dictionary_settings)
+        if dictionary_source_path:
+            model.phoneme_dictionary_path = dictionary_source_path
+
+        if max_dictionary_index is not None:
+            capacity = getattr(model, 'n_token', None)
+            if isinstance(capacity, int) and max_dictionary_index >= capacity:
+                raise ValueError(
+                    "The phoneme dictionary index range exceeds the auxiliary ASR vocabulary size. "
+                    f"Maximum dictionary index is {max_dictionary_index} while the model only supports "
+                    f"{capacity} tokens. Ensure the ASR checkpoint and dictionary were trained together."
+                )
 
     return model
 

@@ -5,12 +5,23 @@ from __future__ import annotations
 import csv
 import os
 import threading
-from typing import Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
+
+import yaml
 
 DictionaryLike = Mapping[str, int]
 
 
-__all__ = ["load_phoneme_dictionary"]
+DEFAULT_DICTIONARY_PATH = os.path.join(
+    os.path.dirname(__file__), "Data", "word_index_dict.txt"
+)
+
+
+__all__ = [
+    "DEFAULT_DICTIONARY_PATH",
+    "load_phoneme_dictionary",
+    "resolve_phoneme_dictionary_settings",
+]
 
 
 # Process-local cache keyed by absolute dictionary paths.
@@ -99,3 +110,102 @@ def load_phoneme_dictionary(
         dictionary = _load_dictionary(path)
         _LOCAL_CACHE[path] = dictionary
         return dict(dictionary)
+
+
+def _cfg_get_nested(cfg: Mapping[str, Any], path, default=None, sep: str = "."):
+    if isinstance(path, str):
+        keys = path.split(sep)
+    else:
+        keys = list(path or [])
+
+    current: Any = cfg
+    for key in keys:
+        if isinstance(current, Mapping) and key in current:
+            current = current[key]
+        else:
+            return default
+    return current
+
+
+def _deep_merge_dict(base: Mapping[str, Any], overrides: Mapping[str, Any]) -> Dict[str, Any]:
+    merged = dict(base)
+    for key, value in overrides.items():
+        if isinstance(value, Mapping) and isinstance(merged.get(key), Mapping):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _resolve_relative_path(path: Optional[Union[str, DictionaryLike]], base_dir: Optional[str]):
+    if not isinstance(path, str):
+        return path
+
+    expanded = os.path.expanduser(path)
+    if os.path.isabs(expanded):
+        return expanded
+
+    if base_dir:
+        candidate = os.path.abspath(os.path.join(base_dir, expanded))
+        if os.path.exists(candidate):
+            return candidate
+
+    return expanded
+
+
+def resolve_phoneme_dictionary_settings(
+    data_params: Optional[Mapping[str, Any]] = None,
+    asr_config_path: Optional[str] = None,
+    default_path: Optional[Union[str, DictionaryLike]] = DEFAULT_DICTIONARY_PATH,
+) -> Tuple[Union[str, DictionaryLike, None], Dict[str, Any]]:
+    """Resolve the phoneme dictionary source and configuration.
+
+    Args:
+        data_params: Optional mapping containing dataset configuration values.
+        asr_config_path: Optional path to an Auxiliary ASR configuration file.
+        default_path: Fallback dictionary source when neither overrides nor
+            configuration provide one.
+
+    Returns:
+        Tuple of ``(dictionary_source, dictionary_config)`` where
+        ``dictionary_source`` is either a filesystem path, a mapping, or
+        ``None`` when no source could be determined, and ``dictionary_config``
+        contains any dictionary loading options from the configuration.
+    """
+
+    dictionary_source: Union[str, DictionaryLike, None] = None
+    dictionary_config: Dict[str, Any] = {}
+
+    config_data: Mapping[str, Any] = {}
+    config_dir: Optional[str] = None
+
+    if asr_config_path:
+        try:
+            with open(asr_config_path, "r", encoding="utf-8") as handle:
+                config_data = yaml.safe_load(handle) or {}
+        except FileNotFoundError:
+            config_data = {}
+        config_dir = os.path.dirname(os.path.abspath(asr_config_path))
+
+    if config_data:
+        config_dictionary = _cfg_get_nested(config_data, "phoneme_dictionary", {}) or {}
+        if isinstance(config_dictionary, Mapping):
+            dictionary_config = dict(config_dictionary)
+        dictionary_path = _cfg_get_nested(config_data, "phoneme_maps_path", None)
+        dictionary_source = _resolve_relative_path(dictionary_path, config_dir)
+
+    if isinstance(data_params, Mapping):
+        override_path = data_params.get("phoneme_dict_path")
+        if override_path is None:
+            override_path = data_params.get("dict_path")
+        if override_path is not None:
+            dictionary_source = _resolve_relative_path(override_path, config_dir)
+
+        override_cfg = data_params.get("phoneme_dictionary_config")
+        if isinstance(override_cfg, Mapping):
+            dictionary_config = _deep_merge_dict(dictionary_config, override_cfg)
+
+    if dictionary_source is None:
+        dictionary_source = default_path
+
+    return dictionary_source, dictionary_config
