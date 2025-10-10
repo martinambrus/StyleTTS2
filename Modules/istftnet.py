@@ -533,7 +533,13 @@ class Decoder(nn.Module):
 
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
         N = self.N_conv(N.unsqueeze(1))
-        
+
+        target_length = asr.size(-1)
+        if F0.size(-1) != target_length:
+            F0 = F.interpolate(F0, size=target_length, mode="linear", align_corners=False)
+        if N.size(-1) != target_length:
+            N = F.interpolate(N, size=target_length, mode="linear", align_corners=False)
+
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
         
