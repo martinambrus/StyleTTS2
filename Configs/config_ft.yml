@@ -10,6 +10,7 @@ second_stage_load_pretrained: true # set to true if the pre-trained model is for
 load_only_params: true # set to true if do not want to load epoch numbers and optimizer parameters
 
 F0_path: "Utils/JDC/bst.t7"
+F0_config: null
 ASR_config: "Utils/ASR/config.yml"
 ASR_path: "Utils/ASR/epoch_00080.pth"
 PLBERT_dir: 'Utils/PLBERT/'

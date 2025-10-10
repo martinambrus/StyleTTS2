@@ -1,6 +1,10 @@
 #coding:utf-8
 import math
 
+import csv
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -712,33 +716,189 @@ class DurationEncoder(nn.Module):
         return mask
 
 
-def load_F0_models(path):
-    # load F0 model
+def _deep_merge_dicts(*dicts: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = {}
+    for data in dicts:
+        if not isinstance(data, dict):
+            continue
+        for key, value in data.items():
+            if (
+                key in merged
+                and isinstance(merged[key], dict)
+                and isinstance(value, dict)
+            ):
+                merged[key] = _deep_merge_dicts(merged[key], value)
+            elif isinstance(value, dict):
+                merged[key] = _deep_merge_dicts(value)
+            else:
+                merged[key] = value
+    return merged
 
-    F0_model = JDCNet(num_class=1, seq_len=192)
-    params = torch.load(path, map_location="cpu")["net"]
-    F0_model.load_state_dict(params)
+
+def _resolve_path(base_dir: Optional[Path], candidate: Optional[str]) -> Optional[Path]:
+    if not candidate:
+        return None
+    path = Path(candidate)
+    if not path.is_file() and base_dir is not None:
+        path = (base_dir / candidate).expanduser()
+    try:
+        return path if path.is_file() else None
+    except OSError:
+        return None
+
+
+def load_F0_models(path, config_path: Optional[str] = None):
+    """Load an F0 model trained with the legacy or enhanced PitchExtractor repos."""
+
+    checkpoint = torch.load(path, map_location="cpu", weights_only=False)
+    state_dict: Dict[str, torch.Tensor]
+    if isinstance(checkpoint, dict):
+        state_dict = checkpoint.get("model") or checkpoint.get("net")
+        if state_dict is None:
+            state_dict = checkpoint.get("state_dict") or checkpoint
+    else:
+        state_dict = checkpoint
+
+    if not isinstance(state_dict, dict):
+        raise RuntimeError("Unexpected checkpoint format for F0 model")
+
+    config_sources = []
+    if config_path:
+        cfg_file = _resolve_path(Path(config_path).parent, config_path)
+        if cfg_file is None:
+            cfg_file = Path(config_path)
+        try:
+            with open(cfg_file) as f:
+                cfg_data = yaml.safe_load(f)
+        except FileNotFoundError:
+            cfg_data = None
+        if isinstance(cfg_data, dict):
+            config_sources.append(cfg_data.get("model_params"))
+    if isinstance(checkpoint, dict):
+        config_sources.append(checkpoint.get("model_params"))
+        config_section = checkpoint.get("config")
+        if isinstance(config_section, dict):
+            config_sources.append(config_section.get("model_params"))
+
+    model_params = _deep_merge_dicts(*config_sources)
+    sequence_model_config = {}
+    if isinstance(model_params, dict):
+        sequence_model_config = model_params.pop("sequence_model", {}) or {}
+    else:
+        model_params = {}
+
+    classifier_weight = state_dict.get("classifier.weight")
+    inferred_classes = None
+    if isinstance(classifier_weight, torch.Tensor) and classifier_weight.ndim >= 1:
+        inferred_classes = int(classifier_weight.shape[0])
+
+    num_class = model_params.pop("num_class", None)
+    if not isinstance(num_class, int) or num_class <= 0:
+        num_class = inferred_classes if inferred_classes is not None else 1
+
+    kwargs: Dict[str, Any] = {
+        "num_class": num_class,
+    }
+    for key in ["leaky_relu_slope", "head_dropout"]:
+        value = model_params.pop(key, None)
+        if isinstance(value, (int, float)):
+            kwargs[key] = float(value)
+    if sequence_model_config:
+        kwargs["sequence_model_config"] = sequence_model_config
+
+    F0_model = JDCNet(**kwargs)
+    missing = F0_model.load_state_dict(state_dict, strict=False)
+    if missing.missing_keys or missing.unexpected_keys:
+        # Ignore incompatible keys silently to retain backwards compatibility.
+        pass
     _ = F0_model.train()
 
     return F0_model
 
 
-def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
-    # load ASR model
-    def _load_config(path):
-        with open(path) as f:
-            config = yaml.safe_load(f)
-        model_config = config["model_params"]
-        return model_config
+def _load_token_map(config: Dict[str, Any], config_path: Path) -> Optional[Dict[str, int]]:
+    token_src = config.get("phoneme_maps_path")
+    if isinstance(token_src, dict):
+        try:
+            return {str(k): int(v) for k, v in token_src.items()}
+        except (TypeError, ValueError):
+            return None
 
-    def _load_model(model_config, model_path):
-        model = ASRCNN(**model_config)
-        params = torch.load(model_path, map_location="cpu", weights_only=False)["model"]
-        model.load_state_dict(params)
+    path = None
+    if isinstance(token_src, str):
+        path = _resolve_path(config_path.parent, token_src) or Path(token_src)
+    if path is not None and path.is_file():
+        token_map: Dict[str, int] = {}
+        try:
+            with open(path, newline="") as f:
+                reader = csv.reader(f)
+                for row in reader:
+                    if len(row) < 2:
+                        continue
+                    symbol = row[0].strip()
+                    if symbol.startswith("\"") and symbol.endswith("\"") and len(symbol) >= 2:
+                        symbol = symbol[1:-1]
+                    try:
+                        token_map[symbol] = int(row[1])
+                    except ValueError:
+                        continue
+        except OSError:
+            token_map = {}
+        if token_map:
+            return token_map
+
+    return None
+
+
+def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
+    # load ASR model compatible with legacy and enhanced AuxiliaryASR repos
+    config_path = Path(ASR_MODEL_CONFIG)
+    with open(config_path) as f:
+        raw_config = yaml.safe_load(f)
+
+    model_config = {}
+    if isinstance(raw_config, dict):
+        model_config = dict(raw_config.get("model_params", {}) or {})
+
+    token_map = _load_token_map(raw_config or {}, config_path)
+    n_token = model_config.get("n_token")
+    if (not isinstance(n_token, int) or n_token <= 0) and token_map is not None:
+        model_config["n_token"] = len(token_map)
+
+    stabilization_cfg = raw_config.get("stabilization") if isinstance(raw_config, dict) else None
+    if isinstance(stabilization_cfg, dict):
+        model_config.setdefault("stabilization_config", stabilization_cfg)
+
+    multi_task_cfg = raw_config.get("multi_task") if isinstance(raw_config, dict) else None
+    if isinstance(multi_task_cfg, dict):
+        model_config.setdefault("multi_task_config", multi_task_cfg)
+
+    memory_opt_cfg = raw_config.get("memory_optimizations") if isinstance(raw_config, dict) else None
+    if isinstance(memory_opt_cfg, dict):
+        model_config.setdefault("memory_optimization_config", memory_opt_cfg)
+
+    def _load_model(model_params: Dict[str, Any], model_path):
+        model = ASRCNN(**model_params)
+        checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
+        if isinstance(checkpoint, dict):
+            state_dict = (
+                checkpoint.get("model")
+                or checkpoint.get("ema_model")
+                or checkpoint.get("model_non_ema")
+                or checkpoint.get("state_dict")
+            )
+        else:
+            state_dict = checkpoint
+        if not isinstance(state_dict, dict):
+            raise RuntimeError("Unexpected checkpoint format for ASR model")
+        try:
+            model.load_state_dict(state_dict)
+        except RuntimeError:
+            cleaned_state = {k.replace("module.", ""): v for k, v in state_dict.items()}
+            model.load_state_dict(cleaned_state, strict=False)
         return model
 
-    asr_model_config = _load_config(ASR_MODEL_CONFIG)
-    asr_model = _load_model(asr_model_config, ASR_MODEL_PATH)
+    asr_model = _load_model(model_config, ASR_MODEL_PATH)
     _ = asr_model.train()
 
     return asr_model

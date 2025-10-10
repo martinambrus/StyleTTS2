@@ -88,7 +88,8 @@ def main(config_path):
 
         # load pretrained F0 model
         F0_path = config.get('F0_path', False)
-        pitch_extractor = load_F0_models(F0_path)
+        F0_config = config.get('F0_config', None)
+        pitch_extractor = load_F0_models(F0_path, F0_config)
 
         # load BERT model
         from Utils.PLBERT.util import load_plbert
