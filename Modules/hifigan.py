@@ -508,8 +508,7 @@ class Decoder(nn.Module):
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
         N = self.N_conv(N.unsqueeze(1))
 
-        target_length = max(asr.size(-1), F0.size(-1), N.size(-1))
-        asr = self._match_time_length(asr, target_length)
+        target_length = asr.size(-1)
         F0 = self._match_time_length(F0, target_length)
         N = self._match_time_length(N, target_length)
         F0_curve = self._match_time_length(F0_curve, target_length)
