@@ -1,0 +1,391 @@
+log_dir: "Checkpoint"
+save_freq: 10
+device: "cuda"
+epochs: 250
+batch_size: 64
+pretrained_model: true
+load_only_params: false
+train_data: "Data/train_list.txt"
+val_data: "Data/val_list.txt"
+ood_data: "Data/OOD_texts.txt"
+phoneme_maps_path: "Data/word_index_dict.txt"
+
+# Control how phoneme dictionaries are loaded.  When lazy loading is enabled the
+# CSV file is only parsed the first time a worker needs the mapping.  The shared
+# cache reuses the parsed dictionary across dataloader workers via a
+# multiprocessing manager so that each process avoids re-reading the CSV.
+phoneme_dictionary:
+  lazy_loading:
+    enabled: true  # Set to false to parse the dictionary immediately during dataset initialisation.
+  shared_cache:
+    enabled: true  # Disable to fall back to per-process caching without cross-worker sharing.
+
+# Controls caching of parsed metadata entries and audio durations.  Enabling this
+# significantly reduces start-up time by avoiding repeated WAV header scans.
+metadata_cache:
+  enabled: true  # Master switch for metadata caching.
+  directory: "Data/cache"  # Directory used to store cached metadata snapshots.
+  validate_audio: true  # Re-validate cached entries using audio file mtimes and sizes.
+  # The cache automatically refreshes when the cached sample rate or frame count of
+  # the first audio file no longer matches the dataset on disk.
+  datasets:
+    train: true  # Cache the training metadata file.
+    val: true    # Cache the validation metadata file.
+    ood: false   # Cache out-of-domain metadata when available.
+
+# Persist pre-computed log-mel features to memory-mapped ``.npy`` files.  When
+# enabled the dataset will lazily reuse stored log-mels as long as the mel
+# options (sample rate, FFT parameters, number of mels, etc.) remain unchanged.
+# Any change to those parameters triggers an automatic cache invalidation.
+mel_cache:
+  enabled: true  # Toggle for log-mel feature caching.
+  directory: "Data/mel_cache"  # Directory where memory-mapped mel files are stored.
+  dtype: float32  # Floating point precision used for the cached tensors.
+  datasets:
+    train: true  # Enable caching for training dataloaders (skipped when mixup or waveform augmentation is active).
+    val: true    # Enable caching for validation/evaluation dataloaders.
+    ood: true    # Enable caching for any auxiliary/ood evaluation loaders.
+
+memory_optimizations:
+  lazy_masks:
+    enabled: true
+    future_mask: true
+    text_mask: true
+  gradient_checkpointing:
+    enabled: true
+    start_layer: 3
+    end_layer: null
+    chunk_size: 0
+    segments: 1
+    min_sequence_length: 0
+    use_checkpoint_sequential: true
+    use_reentrant: false
+
+precision:
+  mixed_precision:
+    enabled: true
+    dtype: float16
+    grad_scaler:
+      enabled: true
+      init_scale: 65536.0
+      growth_factor: 2.0
+      backoff_factor: 0.5
+      growth_interval: 2000
+
+preprocess_params:
+  sr: 24000
+  spect_params:
+    n_fft: 1024
+    win_length: 1024
+    hop_length: 300
+  mel_params:
+    n_mels: 80
+
+model_params:
+   input_dim: 80
+   hidden_dim: 256
+   token_embedding_dim: 512
+   n_layers: 5
+   location_kernel_size: 31
+   attention_dropout: 0.1
+
+multi_task:
+  use_ctc: true
+  use_seq2seq: true
+  frame_phoneme:
+    enabled: true
+    num_classes: 0   # defaults to n_token when set to 0 or omitted
+  speaker:
+    enabled: false
+    num_speakers: 0  # when 0 the trainer will infer it from the dataset metadata
+    embedding_dim: 128
+  pronunciation_error:
+    enabled: false
+    num_classes: 2  # set to the number of pronunciation error categories your dataset annotates
+  head_sharing:
+    ctc_seq2seq:
+      enabled: true
+      detach_for_seq2seq: false
+
+stabilization:
+  stochastic_depth:
+    enabled: false
+    max_drop_rate: 0.15
+    min_drop_rate: 0.0
+    mode: linear  # options: linear, uniform
+  mix_speech:
+    enabled: false
+    alpha: 0.3
+    prob: 0.5
+    dominant_mix: true
+  self_conditioned_ctc:
+    # Enables the self-conditioned CTC feedback block inside the encoder.
+    enabled: true
+    # Weight applied to the auxiliary self-conditioned CTC loss term.
+    loss_weight: 0.0
+    # List encoder layer indices that should consume the CTC feedback signal.
+    layers:
+      - index: 2
+      - index: 4
+    # How the feedback logits are fused with the encoder hidden states.
+    conditioning_strategy: add  # options: add, concat
+    # Whether to stop gradients from flowing from the conditioned layers back into the CTC predictor.
+    detach_conditioning: true
+    # Temperature applied to the softmax before forming the conditioning distribution.
+    temperature: 1.0
+    # Dropout rate used on the CTC predictor head that produces the feedback signal.
+    predictor_dropout: 0.1
+    # Dropout rate applied to the fused representation inside the encoder layer.
+    fusion_dropout: 0.1
+  intermediate_ctc:
+    enabled: true
+    loss_weight: 0.3
+    dropout: 0.1
+    layers:
+      - index: 3
+        weight: 1.0
+
+optimizer_params:
+  lr: 0.0005
+  pct_start: 0.1
+
+# this is a very basic early stopping based off learning rate - when it falls to 0 and remains there for 3 epochs, the training stops
+enable_early_stopping: True
+
+# for more stable learning, first X epochs should be trained with audio files of similar lengths grouped together
+# this option determines epoch during which the sorted dataset will be swapped for a shuffled one
+# default: 10
+sortagrad_switch_to_shuffled_dataset_epoch: 10
+
+# make ASR learn to read phonemes from left to right, not randomly
+use_diagonal_attention_prior: True
+diagonal_attention_prior_weight:
+  initial: 0.05
+  target: 0.02
+  hold_steps: 4000  # keep the helper active for ~3-5k optimiser steps
+  warmup_steps: 0
+diagonal_attention_prior_sigma: 0.25
+
+# stabilizes ASR training for smaller datasets
+entropy_params:
+  label_smoothing: 0.05
+
+ctc_loss:
+  blank_logit_bias: 0.0
+  logit_temperature: 1.0
+  blank_scale:
+    enabled: true
+    base: 0.7
+    schedule:
+      - pct: 0.3
+        value: 0.6
+      - pct: 0.7
+        value: 0.85
+  regularization:
+    blank_rate:
+      enabled: true
+      weight:
+        initial: 0.75
+        target: 0.85
+        warmup_steps: 10000
+      target: 0.62
+      tolerance: 0.05
+      warmup_epochs: 5
+      penalize_low_blank: false
+      blank_run_weight: 0.2
+      blank_run_threshold: 0.5
+    coverage:
+      enabled: true
+      weight: 0.12
+      tv_weight: 0.3
+      margin: 3.0
+      locked_weight: 0.25
+      locked_margin: 0.0
+      locked_softness: 1.0
+      warmup_epochs: 5
+
+alignment_regularization:
+  attention_duration:
+    enabled: true
+    weight: 0.15
+    min_frames: 2.0
+    tolerance: 0.3
+    warmup_epochs: 8
+
+dataset_params:
+  # SpecAugment parameters applied only on the training split.
+  spec_augment:
+    enabled: true
+    apply_prob: 0.5
+    policy: null  # Options: null, LD, LF
+    freq_mask_param: 13
+    time_mask_param: 50
+    num_freq_masks: 2
+    num_time_masks: 2
+    time_warp:
+      enabled: false
+      window: 5
+    adaptive_masking:
+      enabled: false
+      max_time_ratio: 0.15
+      max_freq_ratio: 0.2
+    random_frame_dropout:
+      enabled: false
+      drop_prob: 0.05
+      mode: mean  # options: zero, mean, noise
+    vtlp:
+      enabled: false
+      alpha_low: 0.9
+      alpha_high: 1.1
+  waveform_augmentations:
+    enabled: false
+    noise:
+      enabled: true
+      gaussian: true
+      snr_db: [10, 30]
+      probability: 0.3
+      paths: []
+    musan:
+      enabled: false
+      paths: []
+      snr_db: [0, 15]
+      probability: 0.3
+    reverberation:
+      enabled: false
+      rir_paths: []
+      probability: 0.3
+    impulse_response:
+      enabled: false
+      paths: []
+      probability: 0.3
+  mixup:
+    enabled: false
+    alpha: 0.4
+    apply_prob: 0.2
+    dominant_label: true
+    augment_secondary: true
+  phoneme_dropout:
+    enabled: false
+    drop_prob: 0.1
+    min_tokens: 2
+    preserve_tokens:
+      - " "
+
+dataloader_params:
+  train_num_workers: 8
+  val_num_workers: 2
+  train_bucket_sampler:
+    enabled: true
+    bucket_size_multiplier: 20  # bucket = batch_size * multiplier
+    shuffle_within_bucket: true
+    shuffle_batches: true
+
+training_curriculum:
+  batch_size_schedule:
+    enabled: false
+    base_batch_size: 64
+    initial_batch_size: 24
+    apply_to_validation: false
+    evaluation_epoch: null
+    # With a 20-epoch learning-rate warm-up we keep the early batches smaller and
+    # progressively grow them so that the optimiser sees steadier gradient noise
+    # as the LR ramps.  The linear strategy interpolates between the anchors so
+    # the batch size increases smoothly every epoch until the warm-up finishes.
+    strategies:
+      milestones:
+        enabled: true
+        schedule:
+          - epoch: 1
+            batch_size: 24
+          - epoch: 5
+            batch_size: 32
+          - epoch: 10
+            batch_size: 40
+          - epoch: 15
+            batch_size: 52
+          - epoch: 20
+            batch_size: 64
+      linear:
+        enabled: true
+        update_interval: 1
+        start_epoch: 1
+        end_epoch: 20
+        start_batch_size: 24
+        end_batch_size: 64
+
+loss_weights:
+  ctc: 0.8
+  s2s: 1.0
+  frame_phoneme: 0.0
+  speaker: 0.0
+  pronunciation_error: 0.0
+  intermediate_ctc: 0.3
+  # Weight applied to the auxiliary loss from the self-conditioned CTC predictor.
+  self_conditioned_ctc: 0.0
+
+regularization:
+  entropy:
+    enabled: true
+    # Choose whether to minimise (sharpen) or maximise (smooth) the model's output distributions.
+    mode: maximize  # options: minimize, maximize
+    # Numerical stability constant added inside the log operation.
+    eps: 1.0e-6
+    targets:
+      # Entropy penalties can be enabled independently for each prediction head.
+      ctc:
+        enabled: true
+        weight: 0.02
+        length_normalize: true
+      s2s:
+        enabled: true
+        weight: 0.0
+        length_normalize: true
+
+decoding:
+  beam_search:
+    enabled: true
+    beam_width: 16
+    blank_id: 0
+    length_penalty: 0.7
+    prune_threshold: 1.0e-4
+    log_probs_input: false
+    logit_temperature: 1.1
+    blank_penalty: 0.05
+    insertion_bonus: 0.05
+  shallow_fusion:
+    enabled: false
+    lm_path: null  # path to whitespace-separated phoneme n-gram counts
+    order: 3
+    vocab_size: 40
+    smoothing: 1.0
+    lm_weight: 0.3
+  cold_fusion:
+    enabled: true
+    fusion_weight: 0.4
+    gate_bias: 0.0
+    gate_scale: 1.0
+    neural_lm:
+      vocab_size: 40
+      embedding_dim: 128
+      hidden_dim: 256
+      num_layers: 1
+      sos_id: 1
+      dropout: 0.0
+      checkpoint: null
+
+checkpoint_selection:
+  enabled: true
+  lambda_diag: 0.3
+  lambda_length: 0.3
+  target_length_diff: 4.0
+  length_penalty_mode: absolute
+  lambda_length_grid: [0.2, 0.25, 0.3]
+  target_length_diff_grid: [3, 4, 5]
+  lambda_length_decay:
+    enabled: true
+    target: 2.0
+    tolerance: 0.05
+    confirmations: 2
+    target_ratio: 0.7
+    span_fraction: 0.1
+    min_value: 0.0

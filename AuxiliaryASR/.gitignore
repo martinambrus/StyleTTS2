@@ -1,0 +1,5 @@
+Checkpoint*
+.ipynb_checkpoints*
+.idea*
+Data/cache*
+Data/mel_cache*
