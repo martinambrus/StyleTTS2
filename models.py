@@ -2,6 +2,7 @@
 import math
 
 import csv
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -850,6 +851,65 @@ def _load_token_map(config: Dict[str, Any], config_path: Path) -> Optional[Dict[
     return None
 
 
+def _infer_n_token_from_state_dict(state_dict: Dict[str, Any]) -> Optional[int]:
+    if not isinstance(state_dict, dict):
+        return None
+
+    candidate_sizes = []
+
+    def _record_size(tensor: Any) -> None:
+        if isinstance(tensor, torch.Tensor) and tensor.dim() > 0:
+            size = int(tensor.size(0))
+            if size > 0:
+                candidate_sizes.append(size)
+
+    known_suffixes = (
+        "asr_s2s.embedding.weight",
+        "asr_s2s.project_to_n_symbols.weight",
+        "asr_s2s.project_to_n_symbols.bias",
+        "ctc_classifier.linear_layer.weight",
+        "ctc_classifier.linear_layer.bias",
+        "duration_predictor.0.weight",
+        "frame_classifier.2.linear_layer.weight",
+        "frame_classifier.2.linear_layer.bias",
+    )
+
+    sc_block_markers = (
+        ".predictor.6.conv.weight",
+        ".predictor.6.conv.bias",
+        ".condition_projector.1.conv.weight",
+    )
+
+    ictc_markers = (
+        ".layers.3.conv.weight",
+        ".layers.3.conv.bias",
+    )
+
+    for raw_key, tensor in state_dict.items():
+        if not isinstance(raw_key, str):
+            continue
+        key = raw_key[7:] if raw_key.startswith("module.") else raw_key
+
+        for suffix in known_suffixes:
+            if key.endswith(suffix):
+                _record_size(tensor)
+                break
+        else:
+            if "self_conditioning_blocks" in key:
+                if any(key.endswith(marker) for marker in sc_block_markers):
+                    _record_size(tensor)
+            elif "intermediate_ctc_heads" in key:
+                if any(key.endswith(marker) for marker in ictc_markers):
+                    _record_size(tensor)
+
+    if not candidate_sizes:
+        return None
+
+    counts = Counter(candidate_sizes)
+    most_common, _ = counts.most_common(1)[0]
+    return int(most_common)
+
+
 def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
     # load ASR model compatible with legacy and enhanced AuxiliaryASR repos
     config_path = Path(ASR_MODEL_CONFIG)
@@ -878,7 +938,6 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
         model_config.setdefault("memory_optimization_config", memory_opt_cfg)
 
     def _load_model(model_params: Dict[str, Any], model_path):
-        model = ASRCNN(**model_params)
         checkpoint = torch.load(model_path, map_location="cpu", weights_only=False)
         if isinstance(checkpoint, dict):
             state_dict = (
@@ -891,10 +950,25 @@ def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
             state_dict = checkpoint
         if not isinstance(state_dict, dict):
             raise RuntimeError("Unexpected checkpoint format for ASR model")
+        cleaned_state = {}
+        for key, value in state_dict.items():
+            if isinstance(key, str) and key.startswith("module."):
+                cleaned_state[key[7:]] = value
+            else:
+                cleaned_state[key] = value
+
+        inferred_n_token = _infer_n_token_from_state_dict(cleaned_state)
+        if isinstance(inferred_n_token, int) and inferred_n_token > 0:
+            configured_tokens = model_params.get("n_token")
+            if not isinstance(configured_tokens, int) or configured_tokens <= 0:
+                model_params["n_token"] = inferred_n_token
+            elif configured_tokens != inferred_n_token:
+                model_params["n_token"] = inferred_n_token
+
+        model = ASRCNN(**model_params)
         try:
             model.load_state_dict(state_dict)
         except RuntimeError:
-            cleaned_state = {k.replace("module.", ""): v for k, v in state_dict.items()}
             model.load_state_dict(cleaned_state, strict=False)
         return model
 
