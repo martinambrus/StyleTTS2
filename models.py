@@ -7,7 +7,7 @@ import torch.nn.functional as F
 from torch.nn.utils import weight_norm, spectral_norm
 
 from Utils.ASR.models import ASRCNN
-from Utils.JDC.model import JDCNet
+from Utils.JDC.model import JDCNet, build_jdc_model
 
 from Modules.diffusion.sampler import KDiffusion, LogNormalDistribution
 from Modules.diffusion.modules import Transformer1d, StyleTransformer1d
@@ -712,34 +712,152 @@ class DurationEncoder(nn.Module):
         return mask
 
 
-def load_F0_models(path):
-    # load F0 model
+def load_F0_models(path, config_path=None):
+    """Load a pitch extraction model from a checkpoint and optional config."""
 
-    F0_model = JDCNet(num_class=1, seq_len=192)
-    params = torch.load(path, map_location="cpu")["net"]
-    F0_model.load_state_dict(params)
-    _ = F0_model.train()
+    def _load_config(cfg_path):
+        if not cfg_path:
+            return {}
+        with open(cfg_path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
 
-    return F0_model
+    def _select_state_dict(checkpoint):
+        if not isinstance(checkpoint, dict):
+            return checkpoint
+
+        preferred_keys = ["ema_model", "model", "model_state", "state_dict", "net"]
+        for key in preferred_keys:
+            candidate = checkpoint.get(key)
+            if isinstance(candidate, dict):
+                return candidate
+
+        if all(isinstance(value, torch.Tensor) for value in checkpoint.values()):
+            return checkpoint
+
+        raise RuntimeError("Unable to locate model parameters in checkpoint")
+
+    checkpoint = torch.load(path, map_location="cpu")
+    state_dict = _select_state_dict(checkpoint)
+    sanitized_state = state_dict.__class__(
+        (key.replace("module.", "", 1), value) for key, value in state_dict.items()
+    )
+
+    config = _load_config(config_path)
+    model_params = dict(config.get("model_params", {}))
+
+    f0_model = build_jdc_model(model_params=model_params, state_dict=sanitized_state)
+    missing, unexpected = f0_model.load_state_dict(sanitized_state, strict=False)
+    if missing:
+        print(f"[PitchExtractor] Missing parameters during load: {missing}")
+    if unexpected:
+        print(f"[PitchExtractor] Unexpected parameters during load: {unexpected}")
+    f0_model.train()
+
+    return f0_model
 
 
-def load_ASR_models(ASR_MODEL_PATH, ASR_MODEL_CONFIG):
-    # load ASR model
+def load_ASR_models(asr_model_path, asr_model_config_path=None):
+    """Load the auxiliary ASR model using a training configuration if provided."""
+
     def _load_config(path):
-        with open(path) as f:
-            config = yaml.safe_load(f)
-        model_config = config["model_params"]
-        return model_config
+        if not path:
+            return {}
+        with open(path, "r", encoding="utf-8") as handle:
+            return yaml.safe_load(handle) or {}
 
-    def _load_model(model_config, model_path):
-        model = ASRCNN(**model_config)
-        params = torch.load(model_path, map_location="cpu", weights_only=False)["model"]
-        model.load_state_dict(params)
-        return model
+    def _select_state_dict(checkpoint):
+        if not isinstance(checkpoint, dict):
+            return checkpoint
 
-    asr_model_config = _load_config(ASR_MODEL_CONFIG)
-    asr_model = _load_model(asr_model_config, ASR_MODEL_PATH)
-    _ = asr_model.train()
+        preferred_keys = ["model", "ema_model", "model_state", "state_dict", "net"]
+        for key in preferred_keys:
+            candidate = checkpoint.get(key)
+            if isinstance(candidate, dict):
+                return candidate
+
+        if "net" in checkpoint and isinstance(checkpoint["net"], dict):
+            nested = checkpoint["net"]
+            if isinstance(nested, dict) and "text_aligner" in nested:
+                return nested["text_aligner"]
+            return nested
+
+        if all(isinstance(value, torch.Tensor) for value in checkpoint.values()):
+            return checkpoint
+
+        raise RuntimeError("Unable to locate ASR parameters in checkpoint")
+
+    def _infer_n_token(state_dict, default_value):
+        candidate_keys = [
+            "asr_s2s.embedding.weight",
+            "embedding.weight",
+            "ctc_linear.2.weight",
+            "ctc_classifier.linear_layer.weight",
+        ]
+        for key in candidate_keys:
+            tensor = state_dict.get(key)
+            if isinstance(tensor, torch.Tensor) and tensor.ndim >= 2:
+                return tensor.shape[0]
+
+        for key, tensor in state_dict.items():
+            if not isinstance(tensor, torch.Tensor):
+                continue
+            if key.endswith("embedding.weight") and tensor.ndim == 2:
+                return tensor.shape[0]
+        return default_value
+
+    checkpoint = torch.load(asr_model_path, map_location="cpu")
+    raw_state = _select_state_dict(checkpoint)
+    sanitized_state = raw_state.__class__(
+        (key.replace("module.", "", 1), value) for key, value in raw_state.items()
+    )
+
+    config = _load_config(asr_model_config_path)
+
+    default_model_params = {
+        "input_dim": 80,
+        "hidden_dim": 256,
+        "token_embedding_dim": 512,
+        "n_layers": 6,
+        "location_kernel_size": 63,
+    }
+    model_params = dict(config.get("model_params", {})) or {}
+    for key, value in default_model_params.items():
+        model_params.setdefault(key, value)
+
+    n_token = model_params.get("n_token")
+    if not isinstance(n_token, int) or n_token <= 0:
+        inferred = _infer_n_token(sanitized_state, default_value=model_params.get("n_token", 40))
+        if inferred is not None:
+            model_params["n_token"] = int(inferred)
+
+    multi_task_config = dict(config.get("multi_task", {}))
+    if "multi_task_config" in model_params:
+        merged = dict(model_params.pop("multi_task_config") or {})
+        merged.update(multi_task_config)
+        multi_task_config = merged
+    model_params["multi_task_config"] = multi_task_config
+
+    stabilization_config = dict(config.get("stabilization", {}))
+    if "stabilization_config" in model_params:
+        merged = dict(model_params.pop("stabilization_config") or {})
+        merged.update(stabilization_config)
+        stabilization_config = merged
+    model_params["stabilization_config"] = stabilization_config
+
+    memory_optim_config = dict(config.get("memory_optimizations", {}))
+    if "memory_optimization_config" in model_params:
+        merged = dict(model_params.pop("memory_optimization_config") or {})
+        merged.update(memory_optim_config)
+        memory_optim_config = merged
+    model_params["memory_optimization_config"] = memory_optim_config
+
+    asr_model = ASRCNN(**model_params)
+    missing, unexpected = asr_model.load_state_dict(sanitized_state, strict=False)
+    if missing:
+        print(f"[ASR] Missing parameters during load: {missing}")
+    if unexpected:
+        print(f"[ASR] Unexpected parameters during load: {unexpected}")
+    asr_model.train()
 
     return asr_model
 

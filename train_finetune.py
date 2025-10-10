@@ -5,7 +5,14 @@ from meldataset import build_dataloader
 from monotonic_align import mask_from_lens
 from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
+from utils import (
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    parse_asr_outputs,
+    recursive_munch,
+)
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
 from Modules.slmadv import SLMAdversarialLoss
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
@@ -108,7 +115,8 @@ def main(config_path):
     
     # load pretrained F0 model
     F0_path = config.get('F0_path', False)
-    pitch_extractor = load_F0_models(F0_path)
+    F0_config = config.get('F0_config', None)
+    pitch_extractor = load_F0_models(F0_path, F0_config)
     
     # load PL-BERT model
     BERT_path = config.get('PLBERT_dir', False)
@@ -260,7 +268,8 @@ def main(config_path):
                     ref = torch.cat([ref_ss, ref_sp], dim=1)
                 
             try:
-                ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+                asr_outputs = model.text_aligner(mels, mask, texts)
+                ppgs, s2s_pred, s2s_attn = parse_asr_outputs(asr_outputs)
                 s2s_attn = s2s_attn.transpose(-1, -2)
                 s2s_attn = s2s_attn[..., 1:]
                 s2s_attn = s2s_attn.transpose(-1, -2)
@@ -570,7 +579,8 @@ def main(config_path):
                         mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                         text_mask = length_to_mask(input_lengths).to(texts.device)
 
-                        _, _, s2s_attn = model.text_aligner(mels, mask, texts)
+                        asr_outputs = model.text_aligner(mels, mask, texts)
+                        _, _, s2s_attn = parse_asr_outputs(asr_outputs)
                         s2s_attn = s2s_attn.transpose(-1, -2)
                         s2s_attn = s2s_attn[..., 1:]
                         s2s_attn = s2s_attn.transpose(-1, -2)

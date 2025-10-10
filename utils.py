@@ -65,4 +65,50 @@ def recursive_munch(d):
 def log_print(message, logger):
     logger.info(message)
     print(message)
+
+
+def parse_asr_outputs(outputs):
+    """Normalize AuxiliaryASR outputs to (ctc_logits, s2s_logits, attention)."""
+
+    ctc_logits = None
+    s2s_logits = None
+    alignments = None
+
+    if isinstance(outputs, (list, tuple)):
+        if len(outputs) >= 3:
+            ctc_logits, s2s_logits, alignments = outputs[:3]
+        elif len(outputs) == 2:
+            ctc_logits, s2s_logits = outputs
+        elif len(outputs) == 1:
+            ctc_logits = outputs[0]
+    elif isinstance(outputs, dict):
+        def _get_first_tensor(keys):
+            for key in keys:
+                value = outputs.get(key)
+                if isinstance(value, torch.Tensor):
+                    return value
+            return None
+
+        ctc_logits = _get_first_tensor([
+            "ctc_logits",
+            "logits_ctc",
+            "primary_logits",
+            "logits",
+        ])
+        s2s_logits = _get_first_tensor([
+            "s2s_logits",
+            "s2s_logit",
+            "logits_s2s",
+        ])
+        alignments = outputs.get("s2s_attn")
+        if alignments is None:
+            alignments = outputs.get("alignments")
+        if alignments is None:
+            alignments = outputs.get("s2s_alignments")
+        if alignments is None:
+            alignments = outputs.get("alignment")
+    else:
+        ctc_logits = outputs
+
+    return ctc_logits, s2s_logits, alignments
     
