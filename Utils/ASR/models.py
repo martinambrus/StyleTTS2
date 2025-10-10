@@ -499,7 +499,7 @@ class ASRCNN(nn.Module):
         }
 
         if self.enable_frame_classifier:
-            outputs['frame_phoneme'] = self.frame_classifier(x.transpose(1, 2))
+            outputs['frame_phoneme'] = self.frame_classifier(x)
         else:
             outputs['frame_phoneme'] = None
 
