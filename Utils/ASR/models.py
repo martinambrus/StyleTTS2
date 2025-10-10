@@ -382,9 +382,10 @@ class ASRCNN(nn.Module):
         self_conditioned_log_probs: Dict[str, torch.Tensor] = {}
 
         chunk: List[Tuple[int, nn.Module]] = []
+        chunk_input: Optional[torch.Tensor] = None
 
         def _flush_chunk() -> Optional[int]:
-            nonlocal x, chunk
+            nonlocal x, chunk, chunk_input
             if not chunk:
                 return None
 
@@ -392,26 +393,45 @@ class ASRCNN(nn.Module):
             segments = min(len(modules), self.gradient_checkpoint_segments)
             segments = max(1, segments)
 
+            input_tensor = chunk_input if chunk_input is not None else x
+
             if self.gradient_checkpoint_use_sequential or len(modules) > 1:
                 try:
                     x = checkpoint_sequential(
                         modules,
                         segments,
-                        x,
+                        input_tensor,
                         use_reentrant=self.gradient_checkpoint_use_reentrant,
                     )
                 except TypeError:
-                    x = checkpoint_sequential(modules, segments, x)
+                    x = checkpoint_sequential(modules, segments, input_tensor)
             else:
-                x = checkpoint(modules[0], x, use_reentrant=self.gradient_checkpoint_use_reentrant)
+                x = checkpoint(
+                    modules[0], input_tensor, use_reentrant=self.gradient_checkpoint_use_reentrant
+                )
 
             _, last_module = chunk[-1]
             chunk = []
+            chunk_input = None
             return id(last_module)
 
         active_checkpoint_id = None
 
         for layer_idx, layer in enumerate(self.encoder_layers, start=1):
+            within_range = False
+            if self.enable_gradient_checkpointing:
+                within_range = layer_idx >= self.gradient_checkpoint_start_layer and (
+                    self.gradient_checkpoint_end_layer is None
+                    or layer_idx <= self.gradient_checkpoint_end_layer
+                )
+                if within_range:
+                    if not chunk:
+                        chunk_input = x
+                    chunk.append((layer_idx, layer))
+                    active_checkpoint_id = id(layer)
+                elif chunk:
+                    active_checkpoint_id = _flush_chunk()
+
             output = layer(x)
             if self.enable_intermediate_ctc and str(layer_idx) in self.intermediate_ctc_heads:
                 head = self.intermediate_ctc_heads[str(layer_idx)]
@@ -423,18 +443,12 @@ class ASRCNN(nn.Module):
                 self_conditioned_outputs[str(layer_idx)] = conditioned['logits']
                 self_conditioned_log_probs[str(layer_idx)] = conditioned['log_probs']
 
-            if self.enable_gradient_checkpointing:
-                within_range = layer_idx >= self.gradient_checkpoint_start_layer and (
-                    self.gradient_checkpoint_end_layer is None or layer_idx <= self.gradient_checkpoint_end_layer
-                )
-                if within_range:
-                    chunk.append((layer_idx, layer))
-                    active_checkpoint_id = id(layer)
-                    continue
+            if within_range:
+                x = output
+                continue
 
             if chunk:
                 active_checkpoint_id = _flush_chunk()
-                chunk = []
 
             x = output
 

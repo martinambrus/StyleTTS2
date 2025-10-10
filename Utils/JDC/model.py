@@ -66,8 +66,10 @@ class JDCNet(nn.Module):
 
         self.apply(self.init_weights)
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return classification and detection logits."""
+    def forward(
+        self, x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return pitch logits, intermediate GAN features and pooled features."""
 
         seq_len = x.shape[-2]
         convblock_out = self.conv_block(x)
@@ -75,7 +77,12 @@ class JDCNet(nn.Module):
         resblock1_out = self.res_block1(convblock_out)
         resblock2_out = self.res_block2(resblock1_out)
         resblock3_out = self.res_block3(resblock2_out)
-        poolblock_out = self.pool_block(resblock3_out)
+
+        pool_bn = self.pool_block[0](resblock3_out)
+        pool_act = self.pool_block[1](pool_bn)
+        pool_mp = self.pool_block[2](pool_act)
+        gan_feature = pool_mp.transpose(-1, -2)
+        poolblock_out = self.pool_block[3](pool_mp)
 
         classifier_out = (
             poolblock_out.permute(0, 2, 1, 3)
@@ -104,19 +111,20 @@ class JDCNet(nn.Module):
         detector_out = self.detector(detector_out)
         detector_out = detector_out.view((-1, seq_len, 2)).sum(axis=-1)
 
-        return classifier_out, detector_out
+        pitch_logits = torch.abs(classifier_out)
+        return pitch_logits, gan_feature, poolblock_out
 
     def extract_pitch(self, x: torch.Tensor) -> torch.Tensor:
-        pitch, _ = self.forward(x)
+        pitch, _, _ = self.forward(x)
         return pitch.squeeze(-1)
 
     def get_feature(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        pitch, detector = self.forward(x)
-        return pitch.squeeze(-1), detector
+        pitch, _, pooled = self.forward(x)
+        return pitch.squeeze(-1), pooled
 
     def get_feature_GAN(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        pitch, detector = self.forward(x)
-        return pitch.squeeze(-1), detector
+        _, gan_feature, pooled = self.forward(x)
+        return gan_feature, pooled
 
     @staticmethod
     def init_weights(m: nn.Module) -> None:
