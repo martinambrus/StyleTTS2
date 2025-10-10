@@ -510,16 +510,28 @@ class Decoder(nn.Module):
         if feature.size(-1) == target_length:
             return feature
 
+        squeeze_channel = False
+        if feature.ndim == 2:
+            feature = feature.unsqueeze(1)
+            squeeze_channel = True
+
         if target_length > 0:
             feature = F.interpolate(feature, size=target_length, mode="linear", align_corners=False)
             if feature.size(-1) == target_length:
+                if squeeze_channel:
+                    feature = feature.squeeze(1)
                 return feature
 
         if feature.size(-1) > target_length:
-            return feature[..., :target_length]
+            feature = feature[..., :target_length]
+        else:
+            pad = target_length - feature.size(-1)
+            feature = F.pad(feature, (0, pad))
 
-        pad = target_length - feature.size(-1)
-        return F.pad(feature, (0, pad))
+        if squeeze_channel:
+            feature = feature.squeeze(1)
+
+        return feature
 
     def forward(self, asr, F0_curve, N, s):
         F0_curve = self._flatten_feature(F0_curve)
@@ -551,9 +563,11 @@ class Decoder(nn.Module):
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
         N = self.N_conv(N.unsqueeze(1))
 
-        target_length = asr.size(-1)
+        target_length = max(asr.size(-1), F0.size(-1), N.size(-1))
+        asr = self._match_time_length(asr, target_length)
         F0 = self._match_time_length(F0, target_length)
         N = self._match_time_length(N, target_length)
+        F0_curve = self._match_time_length(F0_curve, target_length)
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
         
