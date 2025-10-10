@@ -43,9 +43,11 @@ class JDCNet(nn.Module):
             nn.Dropout(p=0.5),
         )
 
-        self.maxpool1 = nn.MaxPool2d(kernel_size=(1, 40))
-        self.maxpool2 = nn.MaxPool2d(kernel_size=(1, 20))
-        self.maxpool3 = nn.MaxPool2d(kernel_size=(1, 10))
+        # Match the temporal pooling rate of the shared block so concatenated
+        # detector features keep aligned sequence dimensions.
+        self.maxpool1 = nn.MaxPool2d(kernel_size=(1, 40), stride=(1, 32))
+        self.maxpool2 = nn.MaxPool2d(kernel_size=(1, 20), stride=(1, 16))
+        self.maxpool3 = nn.MaxPool2d(kernel_size=(1, 10), stride=(1, 8))
 
         self.detector_conv = nn.Sequential(
             nn.Conv2d(640, 256, 1, bias=False),
@@ -157,10 +159,13 @@ class ResBlock(nn.Module):
         self.maxpool = nn.MaxPool2d(kernel_size=(1, 4), stride=(1, 2))
 
         if self.downsample:
+            # The residual branch only adjusts the channel dimension so it can be
+            # combined with the main path prior to the shared pooling step.
+            # Pooling here would shrink the time/frequency axis and break the
+            # element-wise addition.
             self.downsample_layer = nn.Sequential(
                 nn.Conv2d(in_channels, out_channels, 1, bias=False),
                 nn.BatchNorm2d(out_channels),
-                nn.MaxPool2d(kernel_size=(1, 4), stride=(1, 2)),
             )
         else:
             self.downsample_layer = nn.Identity()
