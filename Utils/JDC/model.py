@@ -5,6 +5,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 
 class JDCNet(nn.Module):
@@ -100,6 +101,21 @@ class JDCNet(nn.Module):
         mp1_out = self.maxpool1(convblock_out)
         mp2_out = self.maxpool2(resblock1_out)
         mp3_out = self.maxpool3(resblock2_out)
+
+        # Some legacy checkpoints expect slightly different pooling shapes.
+        # Resize pooled tensors on-the-fly so concatenation along the channel
+        # axis always succeeds while preserving temporal resolution.
+        target_hw = poolblock_out.shape[2:]
+
+        def _match_spatial_dims(tensor: torch.Tensor) -> torch.Tensor:
+            if tensor.shape[2:] == target_hw:
+                return tensor
+            return F.interpolate(tensor, size=target_hw, mode="bilinear", align_corners=False)
+
+        mp1_out = _match_spatial_dims(mp1_out)
+        mp2_out = _match_spatial_dims(mp2_out)
+        mp3_out = _match_spatial_dims(mp3_out)
+
         concat_out = torch.cat((mp1_out, mp2_out, mp3_out, poolblock_out), dim=1)
         detector_out = self.detector_conv(concat_out)
         detector_out = (
