@@ -442,18 +442,40 @@ class Decoder(nn.Module):
         self.generator = Generator(style_dim, resblock_kernel_sizes, upsample_rates, upsample_initial_channel, resblock_dilation_sizes, upsample_kernel_sizes)
 
         
+    def _flatten_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        if feature.ndim == 3 and feature.shape[-1] == 1:
+            feature = feature.squeeze(-1)
+        if feature.ndim == 3 and feature.shape[1] == 1:
+            feature = feature.squeeze(1)
+        return feature
+
     def forward(self, asr, F0_curve, N, s):
+        F0_curve = self._flatten_feature(F0_curve)
+        N = self._flatten_feature(N)
+
         if self.training:
             downlist = [0, 3, 7]
             F0_down = downlist[random.randint(0, 2)]
             downlist = [0, 3, 7, 15]
             N_down = downlist[random.randint(0, 3)]
             if F0_down:
-                F0_curve = nn.functional.conv1d(F0_curve.unsqueeze(1), torch.ones(1, 1, F0_down).to('cuda'), padding=F0_down//2).squeeze(1) / F0_down
+                smoothing_kernel = torch.ones(1, 1, F0_down, device=F0_curve.device, dtype=F0_curve.dtype)
+                F0_curve = (
+                    nn.functional.conv1d(
+                        F0_curve.unsqueeze(1), smoothing_kernel, padding=F0_down // 2
+                    ).squeeze(1)
+                    / F0_down
+                )
             if N_down:
-                N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to('cuda'), padding=N_down//2).squeeze(1)  / N_down
+                smoothing_kernel = torch.ones(1, 1, N_down, device=N.device, dtype=N.dtype)
+                N = (
+                    nn.functional.conv1d(
+                        N.unsqueeze(1), smoothing_kernel, padding=N_down // 2
+                    ).squeeze(1)
+                    / N_down
+                )
 
-        
+
         F0 = self.F0_conv(F0_curve.unsqueeze(1))
         N = self.N_conv(N.unsqueeze(1))
         
