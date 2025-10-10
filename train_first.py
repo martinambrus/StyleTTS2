@@ -92,9 +92,19 @@ def main(config_path):
     root_path = data_params['root_path']
     min_length = data_params['min_length']
     OOD_data = data_params['OOD_data']
-    
+
+    dataset_config = {}
+    phoneme_dict_path = data_params.get('phoneme_dict_path')
+    if phoneme_dict_path is None:
+        phoneme_dict_path = data_params.get('dict_path')
+    if phoneme_dict_path:
+        dataset_config['dict_path'] = phoneme_dict_path
+    phoneme_dict_cfg = data_params.get('phoneme_dictionary_config')
+    if phoneme_dict_cfg is not None:
+        dataset_config['dictionary_config'] = phoneme_dict_cfg
+
     max_len = config.get('max_len', 200)
-    
+
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
@@ -104,7 +114,7 @@ def main(config_path):
                                         min_length=min_length,
                                         batch_size=batch_size,
                                         num_workers=2,
-                                        dataset_config={},
+                                        dataset_config=dataset_config,
                                         device=device)
 
     val_dataloader = build_dataloader(val_list,
@@ -115,7 +125,7 @@ def main(config_path):
                                       validation=True,
                                       num_workers=0,
                                       device=device,
-                                      dataset_config={})
+                                      dataset_config=dataset_config)
     
     with accelerator.main_process_first():
         # load pretrained ASR model
