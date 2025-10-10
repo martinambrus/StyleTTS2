@@ -19,6 +19,43 @@ import torch
 import torch.nn.functional as F
 import time
 import logging
+
+
+
+def _run_pitch_extractor(extractor, mel):
+    outputs = extractor(mel)
+    classifier = outputs
+    detector = None
+    features = None
+    if isinstance(outputs, dict):
+        classifier = outputs.get('f0') or outputs.get('logits') or outputs.get('classification') or outputs.get('predictions')
+        detector = outputs.get('detector') or outputs.get('voicing')
+        features = outputs.get('features')
+    elif isinstance(outputs, (list, tuple)):
+        if len(outputs) >= 1:
+            classifier = outputs[0]
+        if len(outputs) >= 2:
+            detector = outputs[1]
+        if len(outputs) >= 3:
+            features = outputs[2]
+    if isinstance(classifier, torch.Tensor):
+        if classifier.dim() >= 3 and classifier.size(-1) == 1:
+            classifier = classifier.squeeze(-1)
+        classifier = torch.abs(classifier)
+    return classifier, detector, features
+
+
+
+def _run_text_aligner(aligner, mels, mask, texts):
+    outputs = aligner(mels, mask, texts)
+    if isinstance(outputs, dict):
+        return (
+            outputs.get('ctc_logits'),
+            outputs.get('s2s_logits'),
+            outputs.get('s2s_attn'),
+        )
+    return outputs
+
 logger = get_logger(__name__, log_level="DEBUG")
 
 @click.command()
@@ -88,7 +125,8 @@ def main(config_path):
 
         # load pretrained F0 model
         F0_path = config.get('F0_path', False)
-        pitch_extractor = load_F0_models(F0_path)
+        F0_config = config.get('F0_config') or None
+        pitch_extractor = load_F0_models(F0_path, F0_config)
 
         # load BERT model
         from Utils.PLBERT.util import load_plbert
@@ -169,7 +207,7 @@ def main(config_path):
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
-            ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+            ppgs, s2s_pred, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
 
             s2s_attn = s2s_attn.transpose(-1, -2)
             s2s_attn = s2s_attn[..., 1:]
@@ -231,7 +269,7 @@ def main(config_path):
                 
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                 
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
             
@@ -320,7 +358,7 @@ def main(config_path):
 
                 with torch.no_grad():
                     mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
-                    ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+                    ppgs, s2s_pred, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
 
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
@@ -358,7 +396,7 @@ def main(config_path):
                 en = torch.stack(en)
                 gt = torch.stack(gt).detach()
 
-                F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
+                F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                 s = model.style_encoder(gt.unsqueeze(1))
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(en, F0_real, real_norm, s)
@@ -382,7 +420,7 @@ def main(config_path):
                     gt = mels[bib, :, :mel_length].unsqueeze(0)
                     en = asr[bib, :, :mel_length // 2].unsqueeze(0)
                                         
-                    F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                    F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                     F0_real = F0_real.unsqueeze(0)
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)

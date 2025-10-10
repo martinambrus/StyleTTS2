@@ -22,6 +22,42 @@ import shutil
 import traceback
 import torch.nn.functional as F
 
+
+
+def _run_pitch_extractor(extractor, mel):
+    outputs = extractor(mel)
+    classifier = outputs
+    detector = None
+    features = None
+    if isinstance(outputs, dict):
+        classifier = outputs.get('f0') or outputs.get('logits') or outputs.get('classification') or outputs.get('predictions')
+        detector = outputs.get('detector') or outputs.get('voicing')
+        features = outputs.get('features')
+    elif isinstance(outputs, (list, tuple)):
+        if len(outputs) >= 1:
+            classifier = outputs[0]
+        if len(outputs) >= 2:
+            detector = outputs[1]
+        if len(outputs) >= 3:
+            features = outputs[2]
+    if isinstance(classifier, torch.Tensor):
+        if classifier.dim() >= 3 and classifier.size(-1) == 1:
+            classifier = classifier.squeeze(-1)
+        classifier = torch.abs(classifier)
+    return classifier, detector, features
+
+
+
+def _run_text_aligner(aligner, mels, mask, texts):
+    outputs = aligner(mels, mask, texts)
+    if isinstance(outputs, dict):
+        return (
+            outputs.get('ctc_logits'),
+            outputs.get('s2s_logits'),
+            outputs.get('s2s_attn'),
+        )
+    return outputs
+
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
     def __getattr__(self, name):
@@ -106,7 +142,8 @@ def main(config_path):
     
     # load pretrained F0 model
     F0_path = config.get('F0_path', False)
-    pitch_extractor = load_F0_models(F0_path)
+    F0_config = config.get('F0_config') or None
+    pitch_extractor = load_F0_models(F0_path, F0_config)
     
     # load PL-BERT model
     BERT_path = config.get('PLBERT_dir', False)
@@ -255,7 +292,7 @@ def main(config_path):
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
                 try:
-                    _, _, s2s_attn = model.text_aligner(mels, mask, texts)
+                    _, _, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
                     s2s_attn = s2s_attn.transpose(-1, -2)
@@ -367,8 +404,9 @@ def main(config_path):
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
             
             with torch.no_grad():
-                F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
-                F0 = F0.reshape(F0.shape[0], F0.shape[1] * 2, F0.shape[2], 1).squeeze()
+                F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
+                if isinstance(F0, torch.Tensor):
+                    F0 = F0.reshape(F0.shape[0], F0.shape[1] * 2, F0.shape[2], 1).squeeze()
 
                 N_real = log_norm(gt.unsqueeze(1)).squeeze(1)
                 
@@ -561,7 +599,7 @@ def main(config_path):
                         mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                         text_mask = length_to_mask(input_lengths).to(texts.device)
 
-                        _, _, s2s_attn = model.text_aligner(mels, mask, texts)
+                        _, _, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
                         s2s_attn = s2s_attn.transpose(-1, -2)
                         s2s_attn = s2s_attn[..., 1:]
                         s2s_attn = s2s_attn.transpose(-1, -2)
@@ -643,7 +681,7 @@ def main(config_path):
                     y_rec = model.decoder(en, F0_fake, N_fake, s)
                     loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
-                    F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1)) 
+                    F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1)) 
 
                     loss_F0 = F.l1_loss(F0_real, F0_fake) / 10
 
@@ -673,7 +711,7 @@ def main(config_path):
                     gt = mels[bib, :, :mel_length].unsqueeze(0)
                     en = asr[bib, :, :mel_length // 2].unsqueeze(0)
 
-                    F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                    F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                     F0_real = F0_real.unsqueeze(0)
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
