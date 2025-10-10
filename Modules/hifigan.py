@@ -443,11 +443,28 @@ class Decoder(nn.Module):
 
         
     def _flatten_feature(self, feature: torch.Tensor) -> torch.Tensor:
+        if feature.ndim == 4 and feature.shape[1] == 1:
+            feature = feature.squeeze(1)
         if feature.ndim == 3 and feature.shape[-1] == 1:
             feature = feature.squeeze(-1)
         if feature.ndim == 3 and feature.shape[1] == 1:
             feature = feature.squeeze(1)
         return feature
+
+    def _match_time_length(self, feature: torch.Tensor, target_length: int) -> torch.Tensor:
+        if feature.size(-1) == target_length:
+            return feature
+
+        if target_length > 0:
+            feature = F.interpolate(feature, size=target_length, mode="linear", align_corners=False)
+            if feature.size(-1) == target_length:
+                return feature
+
+        if feature.size(-1) > target_length:
+            return feature[..., :target_length]
+
+        pad = target_length - feature.size(-1)
+        return F.pad(feature, (0, pad))
 
     def forward(self, asr, F0_curve, N, s):
         F0_curve = self._flatten_feature(F0_curve)
@@ -480,11 +497,8 @@ class Decoder(nn.Module):
         N = self.N_conv(N.unsqueeze(1))
 
         target_length = asr.size(-1)
-        if F0.size(-1) != target_length:
-            F0 = F.interpolate(F0, size=target_length, mode="linear", align_corners=False)
-        if N.size(-1) != target_length:
-            N = F.interpolate(N, size=target_length, mode="linear", align_corners=False)
-
+        F0 = self._match_time_length(F0, target_length)
+        N = self._match_time_length(N, target_length)
         x = torch.cat([asr, F0, N], axis=1)
         x = self.encode(x, s)
         
