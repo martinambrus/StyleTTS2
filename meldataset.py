@@ -9,33 +9,12 @@ import pandas as pd
 import torch
 import torchaudio
 import logging
+from typing import Dict, Optional
+
+from text_utils import TextCleaner
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-
-_pad = "$"
-_punctuation = ';:,.!?¡¿—…"«»“” '
-_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-_letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
-
-# Export all symbols:
-symbols = [_pad] + list(_punctuation) + list(_letters) + list(_letters_ipa)
-
-dicts = {}
-for i in range(len((symbols))):
-    dicts[symbols[i]] = i
-
-class TextCleaner:
-    def __init__(self, dummy=None):
-        self.word_index_dictionary = dicts
-    def __call__(self, text):
-        indexes = []
-        for char in text:
-            try:
-                indexes.append(self.word_index_dictionary[char])
-            except KeyError:
-                print(text)
-        return indexes
 
 np.random.seed(1)
 random.seed(1)
@@ -59,19 +38,39 @@ def preprocess(wave):
     return mel_tensor
 
 class FilePathDataset(torch.utils.data.Dataset):
-    def __init__(self,
-                 data_list,
-                 root_path,
-                 sr=24000,
-                 data_augmentation=False,
-                 validation=False,
-                 OOD_data="Data/OOD_texts.txt",
-                 min_length=50,
-                 ):
+    def __init__(
+        self,
+        data_list,
+        root_path,
+        sr=24000,
+        data_augmentation=False,
+        validation=False,
+        OOD_data="Data/OOD_texts.txt",
+        min_length=50,
+        word_index_dict_path=None,
+        dictionary_config=None,
+        phoneme_dictionary_config=None,
+        phoneme_dictionary_path=None,
+        text_cleaner_kwargs: Optional[Dict] = None,
+    ):
 
         _data_list = [line.strip().split('|') for line in data_list]
         self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
-        self.text_cleaner = TextCleaner()
+
+        cleaner_kwargs: Dict = dict(text_cleaner_kwargs or {})
+        phoneme_dict_path = (
+            phoneme_dictionary_path
+            or word_index_dict_path
+            or cleaner_kwargs.pop("phoneme_dictionary_path", None)
+        )
+        phoneme_cfg = dictionary_config if dictionary_config is not None else phoneme_dictionary_config
+        if phoneme_dict_path is not None:
+            cleaner_kwargs.setdefault("word_index_dict_path", phoneme_dict_path)
+        if phoneme_cfg is not None:
+            cleaner_kwargs.setdefault("dictionary_config", phoneme_cfg)
+
+        self.text_cleaner = TextCleaner(**cleaner_kwargs)
+        self.blank_index = self.text_cleaner.word_index_dictionary.get(" ", 0)
         self.sr = sr
 
         self.df = pd.DataFrame(self.data_list)
@@ -118,11 +117,11 @@ class FilePathDataset(torch.utils.data.Dataset):
             ps = self.ptexts[rand_idx]
             
             text = self.text_cleaner(ps)
-            text.insert(0, 0)
-            text.append(0)
+            text.insert(0, self.blank_index)
+            text.append(self.blank_index)
 
             ref_text = torch.LongTensor(text)
-        
+
         return speaker_id, acoustic_feature, text_tensor, ref_text, ref_mel_tensor, ref_label, path, wave
 
     def _load_tensor(self, data):
@@ -138,9 +137,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
         
         text = self.text_cleaner(text)
-        
-        text.insert(0, 0)
-        text.append(0)
+
+        text.insert(0, self.blank_index)
+        text.append(self.blank_index)
         
         text = torch.LongTensor(text)
 
