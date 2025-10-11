@@ -768,6 +768,7 @@ def load_F0_models(path, config_path=None, use_ema=True):
     )
     head_dropout = float(model_params.pop('head_dropout', 0.2))
     leaky_relu_slope = float(model_params.pop('leaky_relu_slope', 0.01))
+    mel_bins = model_params.pop('mel_bins', model_params.pop('n_mels', None))
 
     num_class = model_params.pop('num_class', None)
     if num_class is None:
@@ -786,6 +787,7 @@ def load_F0_models(path, config_path=None, use_ema=True):
         leaky_relu_slope=leaky_relu_slope,
         sequence_model_config=sequence_model_config or None,
         head_dropout=head_dropout,
+        mel_bins=mel_bins or 80,
     )
     missing, unexpected = F0_model.load_state_dict(state_dict, strict=False)
     if missing:

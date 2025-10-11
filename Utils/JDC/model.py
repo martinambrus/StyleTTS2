@@ -20,9 +20,11 @@ class JDCNet(nn.Module):
         leaky_relu_slope=0.01,
         sequence_model_config=None,
         head_dropout=0.2,
+        mel_bins=80,
     ):
         super().__init__()
         self.num_class = num_class
+        self.mel_bins = int(mel_bins) if mel_bins else None
         sequence_model_config = sequence_model_config or {}
         head_dropout = float(head_dropout)
         # Constrain dropout probability to a sensible range for the heads.
@@ -94,9 +96,16 @@ class JDCNet(nn.Module):
                 f"JDCNet expects a 3D (B, mel, T) or 4D (B, 1, mel, T) tensor, got shape {tuple(x.shape)}"
             )
         x = x.float()
-        # Ensure the time dimension is the penultimate dimension (H) for convolutional blocks.
-        if x.shape[-1] >= x.shape[-2]:
-            x = x.transpose(-1, -2)
+        # Ensure the last dimension corresponds to the mel bins so the pooling path collapses as expected.
+        if self.mel_bins is not None:
+            mel_bins = self.mel_bins
+            if x.shape[-1] != mel_bins and x.shape[-2] == mel_bins:
+                x = x.transpose(-1, -2)
+        # Fallback heuristic when mel bin count is unknown: favour the orientation that keeps the smaller
+        # dimension in the last axis so very short utterances (T < mel_bins) still map the mel dimension correctly.
+        if self.mel_bins is None or (x.shape[-1] != self.mel_bins and x.shape[-2] != self.mel_bins):
+            if x.shape[-1] > x.shape[-2]:
+                x = x.transpose(-1, -2)
         return x.contiguous()
 
     def _encode_stages(self, x: torch.Tensor):
@@ -138,7 +147,15 @@ class JDCNet(nn.Module):
             classification_prediction, detection_prediction
             sizes: (b, 31, 722), (b, 31, 2)
         """
-        poolblock_out, convblock_out, resblock1_out, resblock2_out, _resblock3_out, _pool_act, pool_reduced = self._encode_stages(x)
+        (
+            poolblock_out,
+            convblock_out,
+            resblock1_out,
+            resblock2_out,
+            _resblock3_out,
+            _pool_act,
+            pool_reduced,
+        ) = self._encode_stages(x)
         seq_len = poolblock_out.shape[-2]
         ###############################
         # forward pass for classifier #
