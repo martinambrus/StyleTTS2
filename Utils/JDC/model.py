@@ -83,23 +83,66 @@ class JDCNet(nn.Module):
         # initialize weights
         self.apply(self.init_weights)
 
+    def _prepare_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert arbitrary mel layouts to the expected 4D tensor."""
+        if not isinstance(x, torch.Tensor):
+            x = torch.as_tensor(x)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
+        if x.dim() != 4:
+            raise ValueError(
+                f"JDCNet expects a 3D (B, mel, T) or 4D (B, 1, mel, T) tensor, got shape {tuple(x.shape)}"
+            )
+        x = x.float()
+        # Ensure the time dimension is the penultimate dimension (H) for convolutional blocks.
+        if x.shape[-1] >= x.shape[-2]:
+            x = x.transpose(-1, -2)
+        return x.contiguous()
+
+    def _encode_stages(self, x: torch.Tensor):
+        x = self._prepare_input(x)
+        convblock_out = self.conv_block(x)
+
+        resblock1_out = self.res_block1(convblock_out)
+        resblock2_out = self.res_block2(resblock1_out)
+        resblock3_out = self.res_block3(resblock2_out)
+
+        pool_norm = self.pool_block[0](resblock3_out)
+        pool_act = self.pool_block[1](pool_norm)
+        pool_reduced = self.pool_block[2](pool_act)
+        poolblock_out = self.pool_block[3](pool_reduced)
+
+        return (
+            poolblock_out,
+            convblock_out,
+            resblock1_out,
+            resblock2_out,
+            resblock3_out,
+            pool_act,
+            pool_reduced,
+        )
+
+    def get_feature_GAN(self, x):
+        poolblock_out, *_rest = self._encode_stages(x)
+        pool_act = _rest[-2]
+        return pool_act.transpose(-1, -2)
+
+    def get_feature(self, x):
+        poolblock_out, *_rest = self._encode_stages(x)
+        pool_reduced = _rest[-1]
+        return pool_reduced
+
     def forward(self, x):
         """
         Returns:
             classification_prediction, detection_prediction
             sizes: (b, 31, 722), (b, 31, 2)
         """
-        seq_len = x.shape[-2]
+        poolblock_out, convblock_out, resblock1_out, resblock2_out, _resblock3_out, _pool_act, pool_reduced = self._encode_stages(x)
+        seq_len = poolblock_out.shape[-2]
         ###############################
         # forward pass for classifier #
         ###############################
-        convblock_out = self.conv_block(x)
-        
-        resblock1_out = self.res_block1(convblock_out)
-        resblock2_out = self.res_block2(resblock1_out)
-        resblock3_out = self.res_block3(resblock2_out)
-        poolblock_out = self.pool_block(resblock3_out)
-        
         # (b, 256, 31, 2) => (b, 31, 256, 2) => (b, 31, 512)
         classifier_out = poolblock_out.permute(0, 2, 1, 3).contiguous().view((-1, seq_len, 512))
         classifier_out = self.sequence_classifier(classifier_out)
@@ -127,12 +170,12 @@ class JDCNet(nn.Module):
 
         detector_out = detector_out.contiguous().view((-1, detector_out.shape[-1]))
         detector_out = self.detector(detector_out)
-        detector_out = detector_out.view((-1, seq_len, 2)).sum(axis=-1)  # binary classifier - (b, 31, 2)
-        
-        # sizes: (b, 31, 722), (b, 31, 2)
+        detector_out = detector_out.view((-1, seq_len, 2)).sum(axis=-1)  # binary classifier - (b, seq_len)
+
+        # sizes: (b, seq_len, 722), (b, seq_len)
         # classifier output consists of predicted pitch classes per frame
-        # detector output consists of: (isvoice, notvoice) estimates per frame
-        return classifier_out, detector_out
+        # detector output consists of summed (isvoice, notvoice) logits per frame
+        return classifier_out, detector_out, pool_reduced
 
     @staticmethod
     def init_weights(m):
