@@ -22,6 +22,8 @@ data_params:
   root_path: "/local/LJSpeech-1.1/wavs"
   OOD_data: "Data/OOD_texts.txt"
   min_length: 50 # sample until texts with this size are obtained for OOD texts
+  phoneme_dict_path: "Data/word_index_dict.txt"
+  phoneme_dictionary_config: {}
 
 preprocess_params:
   sr: 24000

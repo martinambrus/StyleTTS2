@@ -9,33 +9,11 @@ import pandas as pd
 import torch
 import torchaudio
 import logging
+
+from text_utils import DEFAULT_DICT_PATH, TextCleaner
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-
-_pad = "$"
-_punctuation = ';:,.!?¡¿—…"«»“” '
-_letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'
-_letters_ipa = "ɑɐɒæɓʙβɔɕçɗɖðʤəɘɚɛɜɝɞɟʄɡɠɢʛɦɧħɥʜɨɪʝɭɬɫɮʟɱɯɰŋɳɲɴøɵɸθœɶʘɹɺɾɻʀʁɽʂʃʈʧʉʊʋⱱʌɣɤʍχʎʏʑʐʒʔʡʕʢǀǁǂǃˈˌːˑʼʴʰʱʲʷˠˤ˞↓↑→↗↘'̩'ᵻ"
-
-# Export all symbols:
-symbols = [_pad] + list(_punctuation) + list(_letters) + list(_letters_ipa)
-
-dicts = {}
-for i in range(len((symbols))):
-    dicts[symbols[i]] = i
-
-class TextCleaner:
-    def __init__(self, dummy=None):
-        self.word_index_dictionary = dicts
-    def __call__(self, text):
-        indexes = []
-        for char in text:
-            try:
-                indexes.append(self.word_index_dictionary[char])
-            except KeyError:
-                print(text)
-        return indexes
 
 np.random.seed(1)
 random.seed(1)
@@ -67,11 +45,14 @@ class FilePathDataset(torch.utils.data.Dataset):
                  validation=False,
                  OOD_data="Data/OOD_texts.txt",
                  min_length=50,
+                 dict_path=DEFAULT_DICT_PATH,
+                 dictionary_config=None,
                  ):
 
         _data_list = [line.strip().split('|') for line in data_list]
         self.data_list = [data if len(data) == 3 else (*data, 0) for data in _data_list]
-        self.text_cleaner = TextCleaner()
+        self.text_cleaner = TextCleaner(dict_path, dictionary_config=dictionary_config)
+        self.pad_index = self.text_cleaner.word_index_dictionary.get("$", 0)
         self.sr = sr
 
         self.df = pd.DataFrame(self.data_list)
@@ -118,8 +99,8 @@ class FilePathDataset(torch.utils.data.Dataset):
             ps = self.ptexts[rand_idx]
             
             text = self.text_cleaner(ps)
-            text.insert(0, 0)
-            text.append(0)
+            text.insert(0, self.pad_index)
+            text.append(self.pad_index)
 
             ref_text = torch.LongTensor(text)
         
@@ -138,9 +119,9 @@ class FilePathDataset(torch.utils.data.Dataset):
         wave = np.concatenate([np.zeros([5000]), wave, np.zeros([5000])], axis=0)
         
         text = self.text_cleaner(text)
-        
-        text.insert(0, 0)
-        text.append(0)
+
+        text.insert(0, self.pad_index)
+        text.append(self.pad_index)
         
         text = torch.LongTensor(text)
 
@@ -164,8 +145,8 @@ class Collater(object):
       adaptive_batch_size (bool): if true, decrease batch size when long data comes.
     """
 
-    def __init__(self, return_wave=False):
-        self.text_pad_index = 0
+    def __init__(self, return_wave=False, text_pad_index=0):
+        self.text_pad_index = int(text_pad_index)
         self.min_mel_length = 192
         self.max_mel_length = 192
         self.return_wave = return_wave
@@ -187,8 +168,8 @@ class Collater(object):
 
         labels = torch.zeros((batch_size)).long()
         mels = torch.zeros((batch_size, nmels, max_mel_length)).float()
-        texts = torch.zeros((batch_size, max_text_length)).long()
-        ref_texts = torch.zeros((batch_size, max_rtext_length)).long()
+        texts = torch.full((batch_size, max_text_length), self.text_pad_index, dtype=torch.long)
+        ref_texts = torch.full((batch_size, max_rtext_length), self.text_pad_index, dtype=torch.long)
 
         input_lengths = torch.zeros(batch_size).long()
         ref_lengths = torch.zeros(batch_size).long()
@@ -228,11 +209,27 @@ def build_dataloader(path_list,
                      batch_size=4,
                      num_workers=1,
                      device='cpu',
-                     collate_config={},
-                     dataset_config={}):
-    
-    dataset = FilePathDataset(path_list, root_path, OOD_data=OOD_data, min_length=min_length, validation=validation, **dataset_config)
-    collate_fn = Collater(**collate_config)
+                     collate_config=None,
+                     dataset_config=None):
+
+    dataset_cfg = dict(dataset_config or {})
+    dict_path = dataset_cfg.pop('dict_path', None)
+    dictionary_config = dataset_cfg.pop('dictionary_config', None)
+    dataset_kwargs = dataset_cfg
+    if dict_path is not None:
+        dataset_kwargs['dict_path'] = dict_path
+    if dictionary_config is not None:
+        dataset_kwargs['dictionary_config'] = dictionary_config
+
+    dataset = FilePathDataset(path_list,
+                              root_path,
+                              OOD_data=OOD_data,
+                              min_length=min_length,
+                              validation=validation,
+                              **dataset_kwargs)
+    collate_kwargs = dict(collate_config or {})
+    collate_kwargs.setdefault('text_pad_index', getattr(dataset, 'pad_index', 0))
+    collate_fn = Collater(**collate_kwargs)
     data_loader = DataLoader(dataset,
                              batch_size=batch_size,
                              shuffle=(not validation),

@@ -19,6 +19,72 @@ import torch
 import torch.nn.functional as F
 import time
 import logging
+
+from phoneme_dictionary import resolve_phoneme_dictionary_settings
+
+
+
+def _run_pitch_extractor(extractor, mel):
+    outputs = extractor(mel)
+    classifier = outputs
+    detector = None
+    features = None
+
+    if isinstance(outputs, dict):
+        classifier = (
+            outputs.get('f0')
+            or outputs.get('logits')
+            or outputs.get('classification')
+            or outputs.get('predictions')
+        )
+        detector = outputs.get('detector') or outputs.get('voicing')
+        features = outputs.get('features')
+    elif isinstance(outputs, (list, tuple)):
+        if len(outputs) >= 1:
+            classifier = outputs[0]
+        if len(outputs) >= 2:
+            detector = outputs[1]
+        if len(outputs) >= 3:
+            features = outputs[2]
+
+    def _standardize_pitch_tensor(tensor):
+        if tensor is None:
+            return None
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.as_tensor(tensor)
+        tensor = tensor.float()
+        # Drop singleton channel dimensions while keeping batch/time axes intact.
+        if tensor.dim() >= 3 and tensor.shape[-1] == 1:
+            tensor = tensor[..., 0]
+        if tensor.dim() >= 3 and tensor.shape[1] == 1:
+            tensor = tensor[:, 0, ...]
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        return tensor.contiguous()
+
+    classifier = _standardize_pitch_tensor(classifier)
+    detector = _standardize_pitch_tensor(detector)
+    features = _standardize_pitch_tensor(features)
+
+    if isinstance(classifier, torch.Tensor):
+        classifier = torch.abs(classifier)
+
+    return classifier, detector, features
+
+
+
+def _run_text_aligner(aligner, mels, mask, texts):
+    outputs = aligner(mels, mask, texts)
+    if isinstance(outputs, dict):
+        return (
+            outputs.get('ctc_logits'),
+            outputs.get('s2s_logits'),
+            outputs.get('s2s_attn'),
+        )
+    return outputs
+
 logger = get_logger(__name__, log_level="DEBUG")
 
 @click.command()
@@ -48,16 +114,28 @@ def main(config_path):
     log_interval = config.get('log_interval', 10)
     save_frequency = config.get('save_freq', 2)
     
-    data_params = config.get('data_params', None)
+    data_params = config.get('data_params') or {}
     sr = config['preprocess_params'].get('sr', 24000)
     train_path = data_params['train_data']
     val_path = data_params['val_data']
     root_path = data_params['root_path']
     min_length = data_params['min_length']
     OOD_data = data_params['OOD_data']
-    
+
+    asr_config_path = config.get('ASR_config') or None
+    dictionary_source, dictionary_settings = resolve_phoneme_dictionary_settings(
+        data_params=data_params,
+        asr_config_path=asr_config_path,
+    )
+
+    dataset_config = {}
+    if dictionary_source is not None:
+        dataset_config['dict_path'] = dictionary_source
+    if dictionary_settings:
+        dataset_config['dictionary_config'] = dictionary_settings
+
     max_len = config.get('max_len', 200)
-    
+
     # load data
     train_list, val_list = get_data_path_list(train_path, val_path)
 
@@ -67,7 +145,7 @@ def main(config_path):
                                         min_length=min_length,
                                         batch_size=batch_size,
                                         num_workers=2,
-                                        dataset_config={},
+                                        dataset_config=dataset_config,
                                         device=device)
 
     val_dataloader = build_dataloader(val_list,
@@ -78,17 +156,23 @@ def main(config_path):
                                       validation=True,
                                       num_workers=0,
                                       device=device,
-                                      dataset_config={})
+                                      dataset_config=dataset_config)
     
     with accelerator.main_process_first():
         # load pretrained ASR model
-        ASR_config = config.get('ASR_config', False)
+        ASR_config = asr_config_path
         ASR_path = config.get('ASR_path', False)
-        text_aligner = load_ASR_models(ASR_path, ASR_config)
+        text_aligner = load_ASR_models(
+            ASR_path,
+            ASR_config,
+            dictionary_path=dictionary_source,
+            dictionary_config=dictionary_settings,
+        )
 
         # load pretrained F0 model
         F0_path = config.get('F0_path', False)
-        pitch_extractor = load_F0_models(F0_path)
+        F0_config = config.get('F0_config') or None
+        pitch_extractor = load_F0_models(F0_path, F0_config)
 
         # load BERT model
         from Utils.PLBERT.util import load_plbert
@@ -169,7 +253,7 @@ def main(config_path):
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
-            ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+            ppgs, s2s_pred, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
 
             s2s_attn = s2s_attn.transpose(-1, -2)
             s2s_attn = s2s_attn[..., 1:]
@@ -231,7 +315,7 @@ def main(config_path):
                 
             with torch.no_grad():    
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1).detach()
-                F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
+                F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                 
             s = model.style_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
             
@@ -320,7 +404,7 @@ def main(config_path):
 
                 with torch.no_grad():
                     mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
-                    ppgs, s2s_pred, s2s_attn = model.text_aligner(mels, mask, texts)
+                    ppgs, s2s_pred, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
 
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
@@ -358,7 +442,7 @@ def main(config_path):
                 en = torch.stack(en)
                 gt = torch.stack(gt).detach()
 
-                F0_real, _, F0 = model.pitch_extractor(gt.unsqueeze(1))
+                F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                 s = model.style_encoder(gt.unsqueeze(1))
                 real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
                 y_rec = model.decoder(en, F0_real, real_norm, s)
@@ -382,11 +466,10 @@ def main(config_path):
                     gt = mels[bib, :, :mel_length].unsqueeze(0)
                     en = asr[bib, :, :mel_length // 2].unsqueeze(0)
                                         
-                    F0_real, _, _ = model.pitch_extractor(gt.unsqueeze(1))
-                    F0_real = F0_real.unsqueeze(0)
+                    F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
                     s = model.style_encoder(gt.unsqueeze(1))
                     real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
-                    
+
                     y_rec = model.decoder(en, F0_real, real_norm, s)
                     
                     writer.add_audio('eval/y' + str(bib), y_rec.cpu().numpy().squeeze(), epoch, sample_rate=sr)

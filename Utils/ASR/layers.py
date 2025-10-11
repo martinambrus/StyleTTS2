@@ -1,6 +1,10 @@
+import math
 import torch
 from torch import nn
+from typing import Optional, Any
+from torch import Tensor
 import torch.nn.functional as F
+import torchaudio
 import torchaudio.functional as audio_F
 
 import random
@@ -147,7 +151,8 @@ class LocationLayer(nn.Module):
 
 class Attention(nn.Module):
     def __init__(self, attention_rnn_dim, embedding_dim, attention_dim,
-                 attention_location_n_filters, attention_location_kernel_size):
+                 attention_location_n_filters, attention_location_kernel_size,
+                 attention_dropout=0.0):
         super(Attention, self).__init__()
         self.query_layer = LinearNorm(attention_rnn_dim, attention_dim,
                                       bias=False, w_init_gain='tanh')
@@ -158,6 +163,8 @@ class Attention(nn.Module):
                                             attention_location_kernel_size,
                                             attention_dim)
         self.score_mask_value = -float("inf")
+        self.attention_dropout_p = max(0.0, float(attention_dropout))
+        self._attention_dropout = nn.Dropout(p=self.attention_dropout_p) if self.attention_dropout_p > 0.0 else None
 
     def get_alignment_energies(self, query, processed_memory,
                                attention_weights_cat):
@@ -198,93 +205,16 @@ class Attention(nn.Module):
             alignment.data.masked_fill_(mask, self.score_mask_value)
 
         attention_weights = F.softmax(alignment, dim=1)
+
+        if self._attention_dropout is not None and self.attention_dropout_p > 0.0:
+            attention_weights = self._attention_dropout(attention_weights)
+            denom = attention_weights.sum(dim=1, keepdim=True).clamp_min(1.0e-8)
+            attention_weights = attention_weights / denom
+
         attention_context = torch.bmm(attention_weights.unsqueeze(1), memory)
         attention_context = attention_context.squeeze(1)
 
         return attention_context, attention_weights
-
-
-class ForwardAttentionV2(nn.Module):
-    def __init__(self, attention_rnn_dim, embedding_dim, attention_dim,
-                 attention_location_n_filters, attention_location_kernel_size):
-        super(ForwardAttentionV2, self).__init__()
-        self.query_layer = LinearNorm(attention_rnn_dim, attention_dim,
-                                      bias=False, w_init_gain='tanh')
-        self.memory_layer = LinearNorm(embedding_dim, attention_dim, bias=False,
-                                       w_init_gain='tanh')
-        self.v = LinearNorm(attention_dim, 1, bias=False)
-        self.location_layer = LocationLayer(attention_location_n_filters,
-                                            attention_location_kernel_size,
-                                            attention_dim)
-        self.score_mask_value = -float(1e20)
-
-    def get_alignment_energies(self, query, processed_memory,
-                               attention_weights_cat):
-        """
-        PARAMS
-        ------
-        query: decoder output (batch, n_mel_channels * n_frames_per_step)
-        processed_memory: processed encoder outputs (B, T_in, attention_dim)
-        attention_weights_cat:  prev. and cumulative att weights (B, 2, max_time)
-        RETURNS
-        -------
-        alignment (batch, max_time)
-        """
-
-        processed_query = self.query_layer(query.unsqueeze(1))
-        processed_attention_weights = self.location_layer(attention_weights_cat)
-        energies = self.v(torch.tanh(
-            processed_query + processed_attention_weights + processed_memory))
-
-        energies = energies.squeeze(-1)
-        return energies
-
-    def forward(self, attention_hidden_state, memory, processed_memory,
-                attention_weights_cat, mask, log_alpha):
-        """
-        PARAMS
-        ------
-        attention_hidden_state: attention rnn last output
-        memory: encoder outputs
-        processed_memory: processed encoder outputs
-        attention_weights_cat: previous and cummulative attention weights
-        mask: binary mask for padded data
-        """
-        log_energy = self.get_alignment_energies(
-            attention_hidden_state, processed_memory, attention_weights_cat)
-
-        #log_energy =
-
-        if mask is not None:
-            log_energy.data.masked_fill_(mask, self.score_mask_value)
-
-        #attention_weights = F.softmax(alignment, dim=1)
-
-        #content_score = log_energy.unsqueeze(1) #[B, MAX_TIME] -> [B, 1, MAX_TIME]
-        #log_alpha = log_alpha.unsqueeze(2) #[B, MAX_TIME] -> [B, MAX_TIME, 1]
-
-        #log_total_score = log_alpha + content_score
-
-        #previous_attention_weights = attention_weights_cat[:,0,:]
-
-        log_alpha_shift_padded = []
-        max_time = log_energy.size(1)
-        for sft in range(2):
-            shifted = log_alpha[:,:max_time-sft]
-            shift_padded = F.pad(shifted, (sft,0), 'constant', self.score_mask_value)
-            log_alpha_shift_padded.append(shift_padded.unsqueeze(2))
-
-        biased = torch.logsumexp(torch.cat(log_alpha_shift_padded,2), 2)
-
-        log_alpha_new = biased +  log_energy
-
-        attention_weights =  F.softmax(log_alpha_new, dim=1)
-
-        attention_context = torch.bmm(attention_weights.unsqueeze(1), memory)
-        attention_context = attention_context.squeeze(1)
-
-        return attention_context, attention_weights, log_alpha_new
-
 
 class PhaseShuffle2d(nn.Module):
     def __init__(self, n=2):
