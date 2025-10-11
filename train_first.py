@@ -233,10 +233,13 @@ def main(config_path):
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
-                   model.wd, 
-                   sr, 
-                   model_params.slm.sr).to(device)
+    wl = WavLMLoss(
+        model_params.slm.model,
+        model.wd,
+        sr,
+        model_params.slm.sr,
+        getattr(model_params.slm, "type", "wavlm"),
+    ).to(device)
 
     for epoch in range(start_epoch, epochs):
         running_loss = 0
