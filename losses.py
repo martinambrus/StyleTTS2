@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
+from typing import List
 
 from Modules.whisper_processor import DifferentiableWhisperFeatureExtractor
 
@@ -221,7 +222,7 @@ class WavLMLoss(torch.nn.Module):
             raise ValueError(f"Expected 2D waveform tensor, received shape {tuple(wav.shape)}")
         return wav
 
-    def _encode(self, wav: torch.Tensor, allow_grad: bool) -> list[torch.Tensor]:
+    def _encode(self, wav: torch.Tensor, allow_grad: bool) -> List[torch.Tensor]:
         wav = self._prepare_waveform(wav)
         context = torch.enable_grad() if allow_grad else torch.no_grad()
         with context:
@@ -245,7 +246,7 @@ class WavLMLoss(torch.nn.Module):
             hidden_states = [state.detach() for state in hidden_states]
         return hidden_states
 
-    def _stack_for_discriminator(self, hidden_states: list[torch.Tensor]) -> torch.Tensor:
+    def _stack_for_discriminator(self, hidden_states: List[torch.Tensor]) -> torch.Tensor:
         hidden_size = hidden_states[0].size(-1)
         total_channels = hidden_size * len(hidden_states)
         if total_channels != self.wd.pre.in_channels:
