@@ -231,10 +231,12 @@ def main(config_path):
 
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
-                   model.wd, 
-                   sr, 
-                   model_params.slm.sr).to(device)
+    slm_type = model_params.slm.get('type', 'wavlm')
+    wl = WavLMLoss(model_params.slm.model,
+                   model.wd,
+                   sr,
+                   model_params.slm.sr,
+                   model_type=slm_type).to(device)
 
     gl = MyDataParallel(gl)
     dl = MyDataParallel(dl)

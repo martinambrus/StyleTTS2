@@ -1,7 +1,9 @@
 import torch
 import torch.nn.functional as F
 import torchaudio
-from transformers import AutoModel
+from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
+
+from Modules.whisper_processor import DifferentiableWhisperFeatureExtractor
 
 class SpectralConvergengeLoss(torch.nn.Module):
     """Spectral convergence loss module."""
@@ -191,62 +193,104 @@ class DiscriminatorLoss(torch.nn.Module):
     
 class WavLMLoss(torch.nn.Module):
 
-    def __init__(self, model, wd, model_sr, slm_sr=16000):
+    def __init__(self, model, wd, model_sr, slm_sr=16000, model_type="wavlm"):
         super(WavLMLoss, self).__init__()
-        self.wavlm = AutoModel.from_pretrained(model)
-        self.wd = wd
+        self.model_type = (model_type or "wavlm").lower()
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
-     
+        self.wd = wd
+
+        if self.model_type == "whisper":
+            feature_extractor = WhisperFeatureExtractor.from_pretrained(model)
+            self.feature_extractor = DifferentiableWhisperFeatureExtractor(feature_extractor)
+            whisper_model = WhisperModel.from_pretrained(model)
+            self.slm = whisper_model.encoder
+        else:
+            self.feature_extractor = None
+            self.slm = AutoModel.from_pretrained(model)
+
+        self.slm.eval()
+        for param in self.slm.parameters():
+            param.requires_grad = False
+
+    def _prepare_waveform(self, wav: torch.Tensor) -> torch.Tensor:
+        if wav.dim() == 1:
+            wav = wav.unsqueeze(0)
+        elif wav.dim() == 3 and wav.size(1) == 1:
+            wav = wav.squeeze(1)
+        if wav.dim() != 2:
+            raise ValueError(f"Expected 2D waveform tensor, received shape {tuple(wav.shape)}")
+        return wav
+
+    def _encode(self, wav: torch.Tensor, allow_grad: bool) -> list[torch.Tensor]:
+        wav = self._prepare_waveform(wav)
+        context = torch.enable_grad() if allow_grad else torch.no_grad()
+        with context:
+            wav = self.resample(wav.float())
+
+            if self.model_type == "whisper":
+                features = self.feature_extractor(
+                    wav,
+                    sampling_rate=int(self.resample.new_freq),
+                    padding="max_length",
+                    truncation=True,
+                    return_tensors="pt",
+                )["input_features"]
+                encoder = self.slm
+                outputs = encoder(features, output_hidden_states=True, return_dict=True)
+            else:
+                outputs = self.slm(input_values=wav, output_hidden_states=True, return_dict=True)
+
+        hidden_states = list(outputs.hidden_states)
+        if not allow_grad:
+            hidden_states = [state.detach() for state in hidden_states]
+        return hidden_states
+
+    def _stack_for_discriminator(self, hidden_states: list[torch.Tensor]) -> torch.Tensor:
+        hidden_size = hidden_states[0].size(-1)
+        total_channels = hidden_size * len(hidden_states)
+        if total_channels != self.wd.pre.in_channels:
+            raise ValueError(
+                "Mismatch between discriminator input channels and SLM hidden states: "
+                f"expected {self.wd.pre.in_channels}, received {total_channels}."
+            )
+        return torch.stack(hidden_states, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+
     def forward(self, wav, y_rec):
-        with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(input_values=y_rec_16.squeeze(), output_hidden_states=True).hidden_states
+        wav_embeddings = self._encode(wav, allow_grad=False)
+        y_rec_embeddings = self._encode(y_rec, allow_grad=True)
 
         floss = 0
         for er, eg in zip(wav_embeddings, y_rec_embeddings):
             floss += torch.mean(torch.abs(er - eg))
-        
-        return floss.mean()
-    
-    def generator(self, y_rec):
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(input_values=y_rec_16, output_hidden_states=True).hidden_states
-        y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-        y_df_hat_g = self.wd(y_rec_embeddings)
-        loss_gen = torch.mean((1-y_df_hat_g)**2)
-        
-        return loss_gen
-    
-    def discriminator(self, wav, y_rec):
-        with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-            y_rec_16 = self.resample(y_rec)
-            y_rec_embeddings = self.wavlm(input_values=y_rec_16, output_hidden_states=True).hidden_states
 
-            y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-            y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+        return floss.mean()
+
+    def generator(self, y_rec):
+        embeddings = self._encode(y_rec, allow_grad=True)
+        stacked = self._stack_for_discriminator(embeddings)
+        y_df_hat_g = self.wd(stacked)
+        loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
+
+        return loss_gen
+
+    def discriminator(self, wav, y_rec):
+        wav_embeddings = self._encode(wav, allow_grad=False)
+        y_rec_embeddings = self._encode(y_rec, allow_grad=False)
+
+        y_embeddings = self._stack_for_discriminator(wav_embeddings)
+        y_rec_embeddings = self._stack_for_discriminator(y_rec_embeddings)
 
         y_d_rs = self.wd(y_embeddings)
         y_d_gs = self.wd(y_rec_embeddings)
-        
-        y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
-        
-        r_loss = torch.mean((1-y_df_hat_r)**2)
-        g_loss = torch.mean((y_df_hat_g)**2)
-        
+
+        r_loss = torch.mean((1 - y_d_rs) ** 2)
+        g_loss = torch.mean(y_d_gs ** 2)
+
         loss_disc_f = r_loss + g_loss
-                        
+
         return loss_disc_f.mean()
 
     def discriminator_forward(self, wav):
-        with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-            y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-
-        y_d_rs = self.wd(y_embeddings)
-        
-        return y_d_rs
+        wav_embeddings = self._encode(wav, allow_grad=False)
+        y_embeddings = self._stack_for_discriminator(wav_embeddings)
+        return self.wd(y_embeddings)
