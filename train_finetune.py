@@ -44,9 +44,10 @@ def _run_pitch_extractor(extractor, mel):
         if len(outputs) >= 3:
             features = outputs[2]
     if isinstance(classifier, torch.Tensor):
-        if classifier.dim() >= 3 and classifier.size(-1) == 1:
-            classifier = classifier.squeeze(-1)
         classifier = torch.abs(classifier)
+        classifier = classifier.squeeze()
+        if classifier.dim() == 1:
+            classifier = classifier.unsqueeze(0)
     return classifier, detector, features
 
 
