@@ -32,8 +32,14 @@ def _run_pitch_extractor(extractor, mel):
     classifier = outputs
     detector = None
     features = None
+
     if isinstance(outputs, dict):
-        classifier = outputs.get('f0') or outputs.get('logits') or outputs.get('classification') or outputs.get('predictions')
+        classifier = (
+            outputs.get('f0')
+            or outputs.get('logits')
+            or outputs.get('classification')
+            or outputs.get('predictions')
+        )
         detector = outputs.get('detector') or outputs.get('voicing')
         features = outputs.get('features')
     elif isinstance(outputs, (list, tuple)):
@@ -43,11 +49,30 @@ def _run_pitch_extractor(extractor, mel):
             detector = outputs[1]
         if len(outputs) >= 3:
             features = outputs[2]
+
+    def _standardize_pitch_tensor(tensor):
+        if tensor is None:
+            return None
+        if not isinstance(tensor, torch.Tensor):
+            tensor = torch.as_tensor(tensor)
+        tensor = tensor.float()
+        if tensor.dim() >= 3 and tensor.shape[-1] == 1:
+            tensor = tensor[..., 0]
+        if tensor.dim() >= 3 and tensor.shape[1] == 1:
+            tensor = tensor[:, 0, ...]
+        if tensor.dim() == 0:
+            tensor = tensor.unsqueeze(0)
+        if tensor.dim() == 1:
+            tensor = tensor.unsqueeze(0)
+        return tensor.contiguous()
+
+    classifier = _standardize_pitch_tensor(classifier)
+    detector = _standardize_pitch_tensor(detector)
+    features = _standardize_pitch_tensor(features)
+
     if isinstance(classifier, torch.Tensor):
         classifier = torch.abs(classifier)
-        classifier = classifier.squeeze()
-        if classifier.dim() == 1:
-            classifier = classifier.unsqueeze(0)
+
     return classifier, detector, features
 
 
