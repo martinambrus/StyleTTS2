@@ -200,14 +200,26 @@ class WavLMLoss(torch.nn.Module):
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
         self.wd = wd
 
+        whisper_model = None
+
         if self.model_type == "whisper":
+            whisper_model = WhisperModel.from_pretrained(model)
+        else:
+            auto_model = AutoModel.from_pretrained(model)
+            config_model_type = getattr(auto_model, "config", None)
+            config_model_type = getattr(config_model_type, "model_type", None)
+
+            if isinstance(auto_model, WhisperModel) or config_model_type == "whisper":
+                whisper_model = auto_model if isinstance(auto_model, WhisperModel) else WhisperModel.from_pretrained(model)
+                self.model_type = "whisper"
+            else:
+                self.feature_extractor = None
+                self.slm = auto_model
+
+        if whisper_model is not None:
             feature_extractor = WhisperFeatureExtractor.from_pretrained(model)
             self.feature_extractor = DifferentiableWhisperFeatureExtractor(feature_extractor)
-            whisper_model = WhisperModel.from_pretrained(model)
             self.slm = whisper_model.encoder
-        else:
-            self.feature_extractor = None
-            self.slm = AutoModel.from_pretrained(model)
 
         self.slm.eval()
         for param in self.slm.parameters():
