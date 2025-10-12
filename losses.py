@@ -206,9 +206,13 @@ class WavLMLoss(torch.nn.Module):
             self.slm = whisper_model.encoder
             feature_extractor = WhisperFeatureExtractor.from_pretrained(model)
             self.feature_extractor = DifferentiableWhisperFeatureExtractor(feature_extractor)
-            conv_stride = int(self.slm.conv1.stride[0] * self.slm.conv2.stride[0])
-            max_positions = int(getattr(self.slm.config, "max_source_positions", 1500))
-            self._whisper_expected_frames = conv_stride * max_positions
+            # Some checkpoints have been observed with mutated convolution strides
+            # or ``max_source_positions`` values that no longer correspond to the
+            # canonical Whisper feature budget. The differentiable feature
+            # extractor is already pinned to Whisper's reference 30 s / 3000-frame
+            # window, so we simply mirror that expectation here instead of trusting
+            # potentially-corrupt checkpoint metadata.
+            self._whisper_expected_frames = self.feature_extractor._expected_num_frames
             mel_bins = getattr(self.slm.config, "num_mel_bins", self.feature_extractor.feature_size)
             self._whisper_mel_bins = int(mel_bins)
         else:
