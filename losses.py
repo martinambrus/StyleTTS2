@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 from contextlib import nullcontext
+from typing import Tuple
 from transformers import AutoModel, WhisperFeatureExtractor, WhisperModel
 
 from Modules.whisper_processor import DifferentiableWhisperFeatureExtractor
@@ -224,7 +225,7 @@ class WavLMLoss(torch.nn.Module):
             audio_16 = audio_16.unsqueeze(0)
         return audio_16
 
-    def _encode(self, audio: torch.Tensor, require_grad: bool) -> tuple[torch.Tensor, ...]:
+    def _encode(self, audio: torch.Tensor, require_grad: bool) -> Tuple[torch.Tensor, ...]:
         audio_16 = self._prepare_resampled(audio)
         context = nullcontext() if require_grad else torch.no_grad()
         with context:
@@ -238,7 +239,7 @@ class WavLMLoss(torch.nn.Module):
         return hidden_states
 
     @staticmethod
-    def _stack_hidden_states(hidden_states: tuple[torch.Tensor, ...]) -> torch.Tensor:
+    def _stack_hidden_states(hidden_states: Tuple[torch.Tensor, ...]) -> torch.Tensor:
         stacked = torch.stack(hidden_states, dim=1).transpose(-1, -2)
         return stacked.flatten(start_dim=1, end_dim=2).contiguous()
 
