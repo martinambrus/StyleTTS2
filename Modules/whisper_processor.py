@@ -32,7 +32,11 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         self.sampling_rate = wfe.sampling_rate
         self.feature_size = wfe.feature_size
         self.mel_filters = wfe.mel_filters
-        self.n_samples = wfe.n_samples
+        self.chunk_length = getattr(wfe, "chunk_length", 30.0)
+        default_frames = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
+        self.nb_max_frames = getattr(wfe, "nb_max_frames", default_frames)
+        self.max_input_samples = int(self.nb_max_frames * self.hop_length)
+        self.n_samples = self.max_input_samples
         self.return_attention_mask = wfe.return_attention_mask
         self.padding_side = wfe.padding_side
         self.padding_value = wfe.padding_value
@@ -78,14 +82,14 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         elif raw_speech.ndim != 2:
             raise ValueError(f"Unexpected raw_speech shape: {raw_speech.shape}")
 
-        max_length = max_length if max_length else self.n_samples
+        target_num_samples = max_length if max_length else self.max_input_samples
         current_max_len = raw_speech.shape[-1]
 
-        if current_max_len > max_length:
-            raw_speech = raw_speech[..., 0:max_length]
-        elif current_max_len < max_length:
+        if current_max_len > target_num_samples:
+            raw_speech = raw_speech[..., :target_num_samples]
+        elif current_max_len < target_num_samples:
             batch_size = raw_speech.shape[0]
-            new_len = max_length - current_max_len
+            new_len = target_num_samples - current_max_len
             zeros = torch.zeros((batch_size, new_len), device=raw_speech.device, dtype=raw_speech.dtype)
             raw_speech = torch.cat([raw_speech, zeros], dim=1)
 
@@ -97,7 +101,7 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
     def _pad_or_trim_features(self, input_features: torch.Tensor) -> torch.Tensor:
         """Match Whisper's expected 30s (3000 frame) feature length."""
 
-        expected_len = int(self.n_samples // self.hop_length)
+        expected_len = self.nb_max_frames
         if input_features.shape[-1] > expected_len:
             input_features = input_features[..., :expected_len]
         elif input_features.shape[-1] < expected_len:
