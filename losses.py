@@ -237,7 +237,9 @@ class WavLMLoss(torch.nn.Module):
                 outputs = self.slm(audio_16, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
             else:
+                audio_16 = self.feature_extractor.enforce_waveform_length(audio_16)
                 features = self.feature_extractor(audio_16, sampling_rate=self.slm_sr)["input_features"]
+                features = self.feature_extractor.ensure_expected_num_frames(features)
                 outputs = self.slm(input_features=features, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
         return hidden_states

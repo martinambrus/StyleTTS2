@@ -153,3 +153,32 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
             padding = torch.zeros(pad_shape, device=input_features.device, dtype=input_features.dtype)
             input_features = torch.cat([input_features, padding], dim=-1)
         return input_features
+
+    # ------------------------------------------------------------------
+    # Public helpers ----------------------------------------------------
+    # ------------------------------------------------------------------
+    def enforce_waveform_length(self, waveform: torch.Tensor) -> torch.Tensor:
+        """Pad or trim a waveform batch to Whisper's 30 s window."""
+
+        target = self.n_samples
+        if waveform.ndim == 1:
+            waveform = waveform.unsqueeze(0)
+        if waveform.ndim == 3 and waveform.size(1) == 1:
+            waveform = waveform.squeeze(1)
+        if waveform.ndim != 2:
+            raise ValueError(f"Unexpected waveform shape: {waveform.shape}")
+
+        current = waveform.shape[-1]
+        if current > target:
+            waveform = waveform[..., :target]
+        elif current < target:
+            pad_len = target - current
+            pad_shape = (waveform.shape[0], pad_len)
+            padding = torch.zeros(pad_shape, device=waveform.device, dtype=waveform.dtype)
+            waveform = torch.cat([waveform, padding], dim=-1)
+        return waveform
+
+    def ensure_expected_num_frames(self, input_features: torch.Tensor) -> torch.Tensor:
+        """Expose the feature padding helper for external callers."""
+
+        return self._pad_or_trim_features(input_features)
