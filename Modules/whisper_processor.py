@@ -34,9 +34,10 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         self.mel_filters = wfe.mel_filters
         self.chunk_length = getattr(wfe, "chunk_length", 30.0)
         default_frames = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
-        self.nb_max_frames = getattr(wfe, "nb_max_frames", default_frames)
-        self.max_input_samples = int(self.nb_max_frames * self.hop_length)
-        self.n_samples = self.max_input_samples
+        self.nb_max_frames = default_frames
+        default_samples = int(round(self.chunk_length * self.sampling_rate))
+        self.max_input_samples = default_samples
+        self.n_samples = default_samples
         self.return_attention_mask = wfe.return_attention_mask
         self.padding_side = wfe.padding_side
         self.padding_value = wfe.padding_value
@@ -101,7 +102,7 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
     def _pad_or_trim_features(self, input_features: torch.Tensor) -> torch.Tensor:
         """Match Whisper's expected 30s (3000 frame) feature length."""
 
-        expected_len = self.nb_max_frames
+        expected_len = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
         if input_features.shape[-1] > expected_len:
             input_features = input_features[..., :expected_len]
         elif input_features.shape[-1] < expected_len:
