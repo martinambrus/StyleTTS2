@@ -54,19 +54,49 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         self.padding_side = wfe.padding_side
         self.padding_value = wfe.padding_value
 
+    def _restore_audio_defaults(self) -> None:
+        """Restore Whisper's canonical audio constants before feature extraction."""
+
+        frames_per_second = int(round(self._expected_num_frames / self.chunk_length))
+        tokens_per_second = max(frames_per_second // 2, 1)
+        samples_per_token = max(int(round(self.sampling_rate / tokens_per_second)), 1)
+
+        if (
+            whisper.audio.N_FFT != self.n_fft
+            or whisper.audio.HOP_LENGTH != self.hop_length
+            or whisper.audio.N_FRAMES != self._expected_num_frames
+            or whisper.audio.N_SAMPLES != self.n_samples
+            or whisper.audio.SAMPLE_RATE != self.sampling_rate
+        ):
+            whisper.audio.N_FFT = self.n_fft
+            whisper.audio.HOP_LENGTH = self.hop_length
+            whisper.audio.N_FRAMES = self._expected_num_frames
+            whisper.audio.N_SAMPLES = self.n_samples
+            whisper.audio.SAMPLE_RATE = self.sampling_rate
+            whisper.audio.FRAMES_PER_SECOND = frames_per_second
+            whisper.audio.TOKENS_PER_SECOND = tokens_per_second
+            whisper.audio.N_SAMPLES_PER_TOKEN = samples_per_token
+            whisper.audio.CHUNK_LENGTH = self.chunk_length
+            whisper.audio.mel_filters.cache_clear()
+
     def _hf_differentiable_extract_fbank_features(
         self, waveform: torch.Tensor, device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None
     ) -> torch.Tensor:
         """Return differentiable log-Mel spectrogram on the specified device and dtype."""
 
         _load_whisper()
+        self._restore_audio_defaults()
+
         if device is None:
             device = waveform.device
         if dtype is None:
             dtype = waveform.dtype
 
+        waveform = waveform.to(device=device, dtype=dtype)
+        waveform = whisper.audio.pad_or_trim(waveform, length=self.n_samples)
+
         log_spec = whisper.audio.log_mel_spectrogram(
-            waveform.to(device=device, dtype=dtype), n_mels=self.feature_size, device=device
+            waveform, n_mels=self.feature_size, device=device
         )
         return log_spec.to(device=device, dtype=dtype)
 
