@@ -230,7 +230,11 @@ class WavLMLoss(torch.nn.Module):
         context = nullcontext() if require_grad else torch.no_grad()
         with context:
             if self.slm_type == "wavlm":
-                outputs = self.slm(input_values=audio_16, output_hidden_states=True)
+                # Some WavLM checkpoints (e.g. torchaudio implementations) expect
+                # the waveform as the first positional argument instead of the
+                # HuggingFace-style ``input_values`` keyword. Passing the tensor
+                # positionally keeps compatibility with both variants.
+                outputs = self.slm(audio_16, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
             else:
                 features = self.feature_extractor(audio_16, sampling_rate=self.slm_sr)["input_features"]
