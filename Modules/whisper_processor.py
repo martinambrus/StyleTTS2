@@ -26,8 +26,14 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
 
     def __init__(self, wfe: WhisperFeatureExtractor):
         # copy only the attributes that are required for feature computation
-        self.hop_length = wfe.hop_length
-        self.n_fft = wfe.n_fft
+        # Some checkpoints ship with mutated FFT parameters (e.g. a tiny
+        # ``hop_length``) alongside the inflated ``chunk_length`` that caused
+        # the original crash. Whisper's reference implementation, however,
+        # always uses a 400-point FFT with a hop of 160 samples. Reinstating
+        # those canonical numbers keeps the feature grid consistent with the
+        # encoder's expectations.
+        self.n_fft = 400
+        self.hop_length = 160
         self.dither = getattr(wfe, "dither", 0.0)
         self.sampling_rate = wfe.sampling_rate
         self.feature_size = wfe.feature_size
@@ -39,8 +45,8 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         # pin those budgets here instead of trusting the possibly-modified
         # metadata from ``wfe``.
         self.chunk_length = 30.0
-        default_frames = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
-        self.nb_max_frames = default_frames
+        self._expected_num_frames = 3000
+        self.nb_max_frames = self._expected_num_frames
         default_samples = int(round(self.chunk_length * self.sampling_rate))
         self.max_input_samples = default_samples
         self.n_samples = default_samples
@@ -108,7 +114,7 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
     def _pad_or_trim_features(self, input_features: torch.Tensor) -> torch.Tensor:
         """Match Whisper's expected 30s (3000 frame) feature length."""
 
-        expected_len = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
+        expected_len = self._expected_num_frames
         if input_features.shape[-1] > expected_len:
             input_features = input_features[..., :expected_len]
         elif input_features.shape[-1] < expected_len:
