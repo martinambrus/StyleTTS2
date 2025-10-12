@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import importlib
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 import torch
 from transformers.feature_extraction_utils import BatchFeature
@@ -145,14 +145,16 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         """Match Whisper's expected 30s (3000 frame) feature length."""
 
         expected_len = self._expected_num_frames
-        if input_features.shape[-1] > expected_len:
-            input_features = input_features[..., :expected_len]
-        elif input_features.shape[-1] < expected_len:
-            pad_width = expected_len - input_features.shape[-1]
-            pad_shape = (*input_features.shape[:-1], pad_width)
-            padding = torch.zeros(pad_shape, device=input_features.device, dtype=input_features.dtype)
-            input_features = torch.cat([input_features, padding], dim=-1)
-        return input_features
+        current_len = input_features.shape[-1]
+        if current_len == expected_len:
+            return input_features
+        if current_len > expected_len:
+            return input_features[..., :expected_len]
+
+        pad_width = expected_len - current_len
+        pad_shape: Tuple[int, ...] = (*input_features.shape[:-1], pad_width)
+        padding = torch.zeros(pad_shape, device=input_features.device, dtype=input_features.dtype)
+        return torch.cat([input_features, padding], dim=-1)
 
     # ------------------------------------------------------------------
     # Public helpers ----------------------------------------------------
@@ -181,4 +183,24 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
     def ensure_expected_num_frames(self, input_features: torch.Tensor) -> torch.Tensor:
         """Expose the feature padding helper for external callers."""
 
-        return self._pad_or_trim_features(input_features)
+        if not torch.is_tensor(input_features):
+            raise TypeError("Expected input_features to be a torch.Tensor")
+
+        if input_features.ndim != 3:
+            raise ValueError(
+                f"Expected a 3D tensor shaped (batch, feature_size, frames) but received {input_features.shape}"
+            )
+
+        if input_features.shape[1] == self.feature_size:
+            pass
+        elif input_features.shape[2] == self.feature_size:
+            input_features = input_features.transpose(1, 2).contiguous()
+        else:
+            raise ValueError(
+                "Unable to infer the mel feature axis from the provided tensor; "
+                f"received shape {tuple(input_features.shape)} with feature_size {self.feature_size}."
+            )
+
+        input_features = self._pad_or_trim_features(input_features)
+
+        return input_features.contiguous()

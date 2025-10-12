@@ -206,6 +206,11 @@ class WavLMLoss(torch.nn.Module):
             self.slm = whisper_model.encoder
             feature_extractor = WhisperFeatureExtractor.from_pretrained(model)
             self.feature_extractor = DifferentiableWhisperFeatureExtractor(feature_extractor)
+            conv_stride = int(self.slm.conv1.stride[0] * self.slm.conv2.stride[0])
+            max_positions = int(getattr(self.slm.config, "max_source_positions", 1500))
+            self._whisper_expected_frames = conv_stride * max_positions
+            mel_bins = getattr(self.slm.config, "num_mel_bins", self.feature_extractor.feature_size)
+            self._whisper_mel_bins = int(mel_bins)
         else:
             raise ValueError(f"Unsupported SLM type: {slm_type}")
 
@@ -240,6 +245,25 @@ class WavLMLoss(torch.nn.Module):
                 audio_16 = self.feature_extractor.enforce_waveform_length(audio_16)
                 features = self.feature_extractor(audio_16, sampling_rate=self.slm_sr)["input_features"]
                 features = self.feature_extractor.ensure_expected_num_frames(features)
+                if features.shape[1] != self._whisper_mel_bins:
+                    raise ValueError(
+                        "Unexpected Whisper feature dimension. "
+                        f"Expected mel bins {self._whisper_mel_bins}, received shape {features.shape}."
+                    )
+                expected_frames = self._whisper_expected_frames
+                current_frames = features.shape[-1]
+                if current_frames > expected_frames:
+                    features = features[..., :expected_frames]
+                elif current_frames < expected_frames:
+                    pad_width = expected_frames - current_frames
+                    pad_shape = (*features.shape[:-1], pad_width)
+                    padding = torch.zeros(pad_shape, device=features.device, dtype=features.dtype)
+                    features = torch.cat([features, padding], dim=-1)
+                if features.shape[-1] != expected_frames:
+                    raise ValueError(
+                        "Failed to clamp Whisper input features to the expected length. "
+                        f"Expected {expected_frames}, received {features.shape[-1]}."
+                    )
                 outputs = self.slm(input_features=features, output_hidden_states=True)
                 hidden_states = outputs.hidden_states
         return hidden_states
