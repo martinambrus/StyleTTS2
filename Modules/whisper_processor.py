@@ -90,5 +90,19 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
             raw_speech = torch.cat([raw_speech, zeros], dim=1)
 
         input_features = self._hf_differentiable_extract_fbank_features(raw_speech, device, dtype)
+        input_features = self._pad_or_trim_features(input_features)
 
         return BatchFeature({"input_features": input_features})
+
+    def _pad_or_trim_features(self, input_features: torch.Tensor) -> torch.Tensor:
+        """Match Whisper's expected 30s (3000 frame) feature length."""
+
+        expected_len = int(self.n_samples // self.hop_length)
+        if input_features.shape[-1] > expected_len:
+            input_features = input_features[..., :expected_len]
+        elif input_features.shape[-1] < expected_len:
+            pad_width = expected_len - input_features.shape[-1]
+            pad_shape = (*input_features.shape[:-1], pad_width)
+            padding = torch.zeros(pad_shape, device=input_features.device, dtype=input_features.dtype)
+            input_features = torch.cat([input_features, padding], dim=-1)
+        return input_features
