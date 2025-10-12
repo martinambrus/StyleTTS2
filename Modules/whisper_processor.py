@@ -32,7 +32,13 @@ class DifferentiableWhisperFeatureExtractor(WhisperFeatureExtractor):
         self.sampling_rate = wfe.sampling_rate
         self.feature_size = wfe.feature_size
         self.mel_filters = wfe.mel_filters
-        self.chunk_length = getattr(wfe, "chunk_length", 30.0)
+        # Some downstream configurations accidentally mutate ``chunk_length`` in the
+        # serialized feature-extractor, which then propagates unrealistic budgets
+        # (and ultimately leads to enormous mel tensors). Whisper's encoder,
+        # however, is hard-coded for the 30s/3000-frame window, so we explicitly
+        # pin those budgets here instead of trusting the possibly-modified
+        # metadata from ``wfe``.
+        self.chunk_length = 30.0
         default_frames = int(round(self.chunk_length * self.sampling_rate / self.hop_length))
         self.nb_max_frames = default_frames
         default_samples = int(round(self.chunk_length * self.sampling_rate))
