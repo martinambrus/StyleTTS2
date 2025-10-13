@@ -229,7 +229,7 @@ class WhisperLoss(torch.nn.Module):
         self.slm_hop_length = feature_extractor.hop_length
         self.register_buffer(
             "mel_filters",
-            torch.tensor(feature_extractor.mel_filters, dtype=torch.float32).transpose(0, 1),
+            torch.tensor(feature_extractor.mel_filters, dtype=torch.float32),
             persistent=False,
         )
         self.register_buffer(
@@ -251,7 +251,7 @@ class WhisperLoss(torch.nn.Module):
 
     def _log_mel_spectrogram(self, audio):
         window = self.hann_window.to(audio.device)
-        mel_filters = self.mel_filters.to(audio.device).unsqueeze(0)
+        mel_filters = self.mel_filters.to(audio.device)
         stft = torch.stft(
             audio,
             n_fft=self.n_fft,
@@ -263,7 +263,7 @@ class WhisperLoss(torch.nn.Module):
             return_complex=True,
         )
         magnitudes = stft.abs() ** 2
-        mel = torch.matmul(mel_filters, magnitudes)
+        mel = torch.matmul(magnitudes.transpose(1, 2), mel_filters).transpose(1, 2)
         log_mel = torch.log10(torch.clamp(mel, min=1e-10))
         return log_mel
 
