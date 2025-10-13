@@ -3,7 +3,7 @@ from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
 from utils import get_data_path_list, get_image, length_to_mask, log_norm, log_print, maximum_path, recursive_munch
-from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
+from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from optimizers import build_optimizer
 from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
@@ -233,10 +233,18 @@ def main(config_path):
     stft_loss = MultiResolutionSTFTLoss().to(device)
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
-                   model.wd, 
-                   sr, 
-                   model_params.slm.sr).to(device)
+    slm_hop_length = getattr(
+        model_params.slm,
+        "hop_length",
+        config["preprocess_params"]["spect_params"].get("hop_length", 300),
+    )
+    wl = WhisperLoss(
+        model_params.slm.model,
+        model.wd,
+        sr,
+        model_params.slm.sr,
+        hop_length=slm_hop_length,
+    ).to(device)
 
     for epoch in range(start_epoch, epochs):
         running_loss = 0

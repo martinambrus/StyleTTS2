@@ -1,7 +1,10 @@
+import math
+
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torchaudio
-from transformers import AutoModel
+from transformers import WhisperFeatureExtractor, WhisperModel
 
 class SpectralConvergengeLoss(torch.nn.Module):
     """Spectral convergence loss module."""
@@ -189,64 +192,161 @@ class DiscriminatorLoss(torch.nn.Module):
         return d_loss.mean()
    
     
-class WavLMLoss(torch.nn.Module):
+class WhisperLoss(torch.nn.Module):
 
-    def __init__(self, model, wd, model_sr, slm_sr=16000):
-        super(WavLMLoss, self).__init__()
-        self.wavlm = AutoModel.from_pretrained(model)
+    def __init__(
+        self,
+        model,
+        wd,
+        model_sr,
+        slm_sr=16000,
+        hop_length=300,
+        freeze_encoder=True,
+    ):
+        super().__init__()
+        self.whisper = WhisperModel.from_pretrained(model)
+        if freeze_encoder:
+            for param in self.whisper.parameters():
+                param.requires_grad = False
+        self.whisper.eval()
+        self.downsample_factor = int(
+            self.whisper.encoder.conv1.stride[0] * self.whisper.encoder.conv2.stride[0]
+        )
+        self.register_buffer(
+            "base_positional_embeddings",
+            self.whisper.encoder.embed_positions.weight.data.clone(),
+            persistent=False,
+        )
+
         self.wd = wd
+        self.model_sr = model_sr
+        self.slm_sr = slm_sr
+        self.hop_length = hop_length
+
+        feature_extractor = WhisperFeatureExtractor.from_pretrained(model)
+        self.n_fft = feature_extractor.n_fft
+        self.win_length = getattr(feature_extractor, "win_length", self.n_fft)
+        self.slm_hop_length = feature_extractor.hop_length
+        self.register_buffer(
+            "mel_filters",
+            torch.tensor(feature_extractor.mel_filters, dtype=torch.float32).transpose(0, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "hann_window", torch.hann_window(self.win_length, periodic=True), persistent=False
+        )
+
         self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
-     
+
+    def _prepare_audio(self, audio):
+        if audio.dim() == 3 and audio.size(1) == 1:
+            audio = audio.squeeze(1)
+        return audio.float()
+
+    def _resample(self, audio):
+        return self.resample.to(audio.device)(audio)
+
+    def _target_length(self, audio):
+        return max(1, int(math.ceil(audio.shape[-1] / self.hop_length)))
+
+    def _log_mel_spectrogram(self, audio):
+        window = self.hann_window.to(audio.device)
+        mel_filters = self.mel_filters.to(audio.device).unsqueeze(0)
+        stft = torch.stft(
+            audio,
+            n_fft=self.n_fft,
+            hop_length=self.slm_hop_length,
+            win_length=self.win_length,
+            window=window,
+            center=True,
+            pad_mode="reflect",
+            return_complex=True,
+        )
+        magnitudes = stft.abs() ** 2
+        mel = torch.matmul(mel_filters, magnitudes)
+        log_mel = torch.log10(torch.clamp(mel, min=1e-10))
+        return log_mel
+
+    def _encode(self, audio, target_length):
+        audio = self._prepare_audio(audio)
+        audio_16 = self._resample(audio)
+        log_mel = self._log_mel_spectrogram(audio_16)
+        seq_len = log_mel.shape[-1]
+        padded_len = int(math.ceil(seq_len / self.downsample_factor) * self.downsample_factor)
+        max_allowed = int(self.base_positional_embeddings.shape[0] * self.downsample_factor)
+        if padded_len > max_allowed:
+            padded_len = max_allowed
+        if log_mel.shape[-1] > padded_len:
+            log_mel = log_mel[..., :padded_len]
+        elif log_mel.shape[-1] < padded_len:
+            log_mel = F.pad(log_mel, (0, padded_len - log_mel.shape[-1]))
+        max_positions = max(1, padded_len // self.downsample_factor)
+        if self.whisper.encoder.embed_positions.num_embeddings != max_positions:
+            new_embed = nn.Embedding(max_positions, self.base_positional_embeddings.shape[1])
+            new_embed.weight.data.copy_(
+                self.base_positional_embeddings[:max_positions].to(
+                    device=log_mel.device, dtype=new_embed.weight.dtype
+                )
+            )
+            new_embed.weight.requires_grad = False
+            self.whisper.encoder.embed_positions = new_embed.to(log_mel.device)
+        self.whisper.config.max_source_positions = max_positions
+        log_mel = log_mel.to(self.whisper.dtype)
+        outputs = self.whisper.encoder(
+            input_features=log_mel, output_hidden_states=True
+        )
+        hidden_states = outputs.hidden_states
+        processed = []
+        for hs in hidden_states:
+            hs = hs.transpose(1, 2)
+            hs = F.interpolate(hs, size=target_length, mode="linear", align_corners=False)
+            hs = hs.transpose(1, 2)
+            processed.append(hs)
+        stacked = torch.stack([state.transpose(1, 2) for state in processed], dim=1)
+        stacked = stacked.flatten(start_dim=1, end_dim=2)
+        return processed, stacked
+
     def forward(self, wav, y_rec):
+        target_length = max(self._target_length(wav), self._target_length(y_rec))
         with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(input_values=y_rec_16.squeeze(), output_hidden_states=True).hidden_states
+            wav_states, _ = self._encode(wav, target_length)
+        y_states, _ = self._encode(y_rec, target_length)
 
-        floss = 0
-        for er, eg in zip(wav_embeddings, y_rec_embeddings):
-            floss += torch.mean(torch.abs(er - eg))
-        
-        return floss.mean()
-    
+        floss = 0.0
+        for real_state, gen_state in zip(wav_states, y_states):
+            floss = floss + torch.mean(torch.abs(real_state - gen_state))
+
+        return floss / len(wav_states)
+
     def generator(self, y_rec):
-        y_rec_16 = self.resample(y_rec)
-        y_rec_embeddings = self.wavlm(input_values=y_rec_16, output_hidden_states=True).hidden_states
-        y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-        y_df_hat_g = self.wd(y_rec_embeddings)
-        loss_gen = torch.mean((1-y_df_hat_g)**2)
-        
+        target_length = self._target_length(y_rec)
+        _, y_embeddings = self._encode(y_rec, target_length)
+        y_df_hat_g = self.wd(y_embeddings)
+        loss_gen = torch.mean((1 - y_df_hat_g) ** 2)
         return loss_gen
-    
-    def discriminator(self, wav, y_rec):
-        with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-            y_rec_16 = self.resample(y_rec)
-            y_rec_embeddings = self.wavlm(input_values=y_rec_16, output_hidden_states=True).hidden_states
 
-            y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-            y_rec_embeddings = torch.stack(y_rec_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
+    def discriminator(self, wav, y_rec):
+        target_length = max(self._target_length(wav), self._target_length(y_rec))
+        with torch.no_grad():
+            _, y_embeddings = self._encode(wav, target_length)
+            _, y_rec_embeddings = self._encode(y_rec, target_length)
 
         y_d_rs = self.wd(y_embeddings)
         y_d_gs = self.wd(y_rec_embeddings)
-        
-        y_df_hat_r, y_df_hat_g = y_d_rs, y_d_gs
-        
-        r_loss = torch.mean((1-y_df_hat_r)**2)
-        g_loss = torch.mean((y_df_hat_g)**2)
-        
+
+        r_loss = torch.mean((1 - y_d_rs) ** 2)
+        g_loss = torch.mean(y_d_gs ** 2)
+
         loss_disc_f = r_loss + g_loss
-                        
         return loss_disc_f.mean()
 
     def discriminator_forward(self, wav):
+        target_length = self._target_length(wav)
         with torch.no_grad():
-            wav_16 = self.resample(wav)
-            wav_embeddings = self.wavlm(input_values=wav_16, output_hidden_states=True).hidden_states
-            y_embeddings = torch.stack(wav_embeddings, dim=1).transpose(-1, -2).flatten(start_dim=1, end_dim=2)
-
+            _, y_embeddings = self._encode(wav, target_length)
         y_d_rs = self.wd(y_embeddings)
-        
         return y_d_rs
+
+
+# Backwards compatibility with the previous name
+WavLMLoss = WhisperLoss

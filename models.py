@@ -18,7 +18,7 @@ from Modules.diffusion.diffusion import AudioDiffusionConditional
 from Modules.discriminators import (
     MultiPeriodDiscriminator,
     MultiResSpecDiscriminator,
-    WavLMDiscriminator,
+    WhisperDiscriminator,
 )
 
 from munch import Munch
@@ -1082,7 +1082,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         mpd=MultiPeriodDiscriminator(),
         msd=MultiResSpecDiscriminator(),
         # slm discriminator head
-        wd=WavLMDiscriminator(
+        wd=WhisperDiscriminator(
             args.slm.hidden, args.slm.nlayers, args.slm.initial_channel
         ),
     )
