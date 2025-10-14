@@ -56,6 +56,7 @@ model_params:
       
   # speech language model config
   slm:
+      type: 'wavlm'
       model: 'microsoft/wavlm-base-plus'
       sr: 16000 # sampling rate of SLM
       hidden: 768 # hidden size of SLM

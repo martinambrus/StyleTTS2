@@ -19,6 +19,7 @@ from Modules.discriminators import (
     MultiPeriodDiscriminator,
     MultiResSpecDiscriminator,
     WavLMDiscriminator,
+    WhisperDiscriminator,
 )
 
 from munch import Munch
@@ -1068,6 +1069,25 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     diffusion.diffusion.net = transformer
     diffusion.unet = transformer
 
+    slm_type = getattr(args.slm, "type", None)
+    slm_model = getattr(args.slm, "model", None)
+    if slm_type is None:
+        if isinstance(slm_model, Mapping):
+            slm_type = slm_model.get("type")
+        elif isinstance(slm_model, str) and "whisper" in slm_model.lower():
+            slm_type = "whisper"
+
+    slm_type = (slm_type or "wavlm").lower()
+
+    if slm_type == "whisper":
+        wd_module = WhisperDiscriminator(
+            args.slm.hidden, args.slm.nlayers, args.slm.initial_channel
+        )
+    else:
+        wd_module = WavLMDiscriminator(
+            args.slm.hidden, args.slm.nlayers, args.slm.initial_channel
+        )
+
     nets = Munch(
         bert=bert,
         bert_encoder=nn.Linear(bert.config.hidden_size, args.hidden_dim),
@@ -1082,9 +1102,7 @@ def build_model(args, text_aligner, pitch_extractor, bert):
         mpd=MultiPeriodDiscriminator(),
         msd=MultiResSpecDiscriminator(),
         # slm discriminator head
-        wd=WavLMDiscriminator(
-            args.slm.hidden, args.slm.nlayers, args.slm.initial_channel
-        ),
+        wd=wd_module,
     )
 
     return nets

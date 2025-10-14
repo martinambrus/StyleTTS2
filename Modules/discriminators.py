@@ -156,9 +156,9 @@ class MultiPeriodDiscriminator(torch.nn.Module):
 class WavLMDiscriminator(nn.Module):
     """docstring for Discriminator."""
 
-    def __init__(self, slm_hidden=768, 
-                 slm_layers=13, 
-                 initial_channel=64, 
+    def __init__(self, slm_hidden=768,
+                 slm_layers=13,
+                 initial_channel=64,
                  use_spectral_norm=False):
         super(WavLMDiscriminator, self).__init__()
         norm_f = weight_norm if use_spectral_norm is False else spectral_norm
@@ -184,3 +184,18 @@ class WavLMDiscriminator(nn.Module):
         x = torch.flatten(x, 1, -1)
 
         return x
+
+
+class WhisperDiscriminator(WavLMDiscriminator):
+    """Discriminator head compatible with Whisper encoder embeddings."""
+
+    def __init__(self, slm_hidden=512,
+                 slm_layers=24,
+                 initial_channel=64,
+                 use_spectral_norm=False):
+        super(WhisperDiscriminator, self).__init__(
+            slm_hidden=slm_hidden,
+            slm_layers=slm_layers,
+            initial_channel=initial_channel,
+            use_spectral_norm=use_spectral_norm,
+        )
