@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from contextlib import nullcontext
 
 import torch
@@ -195,22 +196,29 @@ class DiscriminatorLoss(torch.nn.Module):
     
 class WavLMLoss(torch.nn.Module):
 
-    def __init__(self, model, wd, model_sr, slm_sr=16000):
+    def __init__(self, model, wd, model_sr, slm_sr=16000, slm_type=None):
         super(WavLMLoss, self).__init__()
 
         self.wd = wd
-        self.resample = torchaudio.transforms.Resample(model_sr, slm_sr)
-        self.slm_sr = slm_sr
 
         model_name = model
-        model_type = None
-        if isinstance(model, dict):
+        model_type = slm_type
+        if isinstance(model, Mapping):
             model_name = model.get("name") or model.get("model") or model.get("path")
-            model_type = model.get("type")
+            model_type = model_type or model.get("type")
+            slm_sr = slm_sr if slm_sr is not None else model.get("sr", 16000)
+        target_sr = slm_sr if slm_sr is not None else 16000
+        self.resample = torchaudio.transforms.Resample(model_sr, target_sr)
+        self.slm_sr = target_sr
+
         if isinstance(model_name, str):
-            model_type = model_type or ("whisper" if "whisper" in model_name.lower() else "wavlm")
+            inferred_type = "whisper" if "whisper" in model_name.lower() else "wavlm"
+            model_type = model_type or inferred_type
         else:
             model_type = model_type or "wavlm"
+
+        if model_type is not None:
+            model_type = str(model_type)
 
         if model_name is None:
             raise ValueError("A valid model identifier must be provided for the speech language model loss.")
