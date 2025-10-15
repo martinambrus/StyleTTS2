@@ -2,20 +2,25 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
+
+class SkipSLMAdversarial(Exception):
+    pass
+
 class SLMAdversarialLoss(torch.nn.Module):
 
-    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5):
+    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5, accelerator=None):
         super(SLMAdversarialLoss, self).__init__()
         self.model = model
         self.wl = wl
         self.sampler = sampler
-        
+
         self.min_len = min_len
         self.max_len = max_len
         self.batch_percentage = batch_percentage
-        
+
         self.sig = sig
         self.skip_update = skip_update
+        self.accelerator = accelerator
         
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
@@ -121,8 +126,14 @@ class SLMAdversarialLoss(torch.nn.Module):
             if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
                 break
 
-        if len(sp) <= 1:
-            return None
+        batch_size_tensor = torch.tensor([len(sp)], device=ref_text.device)
+        if self.accelerator is not None:
+            global_min_batch = self.accelerator.gather(batch_size_tensor).min().item()
+        else:
+            global_min_batch = batch_size_tensor.min().item()
+
+        if global_min_batch <= 1:
+            raise SkipSLMAdversarial("skip slmadv")
             
         sp = torch.stack(sp)
         wav = torch.stack(wav).float()
