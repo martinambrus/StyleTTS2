@@ -4,14 +4,14 @@ from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
 from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
-from Modules.slmadv import SLMAdversarialLoss
+from Modules.slmadv import SLMAdversarialLoss, SkipSLMAdversarialUpdate
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 from optimizers import build_optimizer
 from monotonic_align import mask_from_lens
 from munch import Munch
+from accelerate import Accelerator, DistributedDataParallelKwargs
 
 import logging
-import copy
 import os
 import yaml
 import time
@@ -86,14 +86,6 @@ def _run_text_aligner(aligner, mels, mask, texts):
         )
     return outputs
 
-# simple fix for dataparallel that allows access to class attributes
-class MyDataParallel(torch.nn.DataParallel):
-    def __getattr__(self, name):
-        try:
-            return super().__getattr__(name)
-        except AttributeError:
-            return getattr(self.module, name)
-        
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
@@ -105,20 +97,34 @@ logger.addHandler(handler)
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
     config = yaml.safe_load(open(config_path))
-    
+
     log_dir = config['log_dir']
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
-    writer = SummaryWriter(log_dir + "/tensorboard")
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    accelerator = Accelerator(
+        project_dir=log_dir,
+        split_batches=True,
+        kwargs_handlers=[ddp_kwargs],
+    )
+
+    if accelerator.is_main_process:
+        shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
+        writer = SummaryWriter(log_dir + "/tensorboard")
+    else:
+        writer = None
 
     # write logs
-    file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
-    logger.addHandler(file_handler)
+    if accelerator.is_main_process:
+        file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
+        logger.addHandler(file_handler)
+    else:
+        logger.setLevel(logging.ERROR)
 
-    
+    accelerator.wait_for_everyone()
+
     batch_size = config.get('batch_size', 10)
 
     epochs = config.get('epochs_2nd', 200)
@@ -154,7 +160,7 @@ def main(config_path):
     optimizer_params = Munch(config['optimizer_params'])
     
     train_list, val_list = get_data_path_list(train_path, val_path)
-    device = 'cuda'
+    device = accelerator.device
 
     train_dataloader = build_dataloader(train_list,
                                         root_path,
@@ -174,36 +180,40 @@ def main(config_path):
                                       num_workers=0,
                                       device=device,
                                       dataset_config=dataset_config)
-    
-    # load pretrained ASR model
-    ASR_config = asr_config_path
-    ASR_path = config.get('ASR_path', False)
-    text_aligner = load_ASR_models(
-        ASR_path,
-        ASR_config,
-        dictionary_path=dictionary_source,
-        dictionary_config=dictionary_settings,
-    )
-    
-    # load pretrained F0 model
-    F0_path = config.get('F0_path', False)
-    F0_config = config.get('F0_config') or None
-    pitch_extractor = load_F0_models(F0_path, F0_config)
-    
-    # load PL-BERT model
-    BERT_path = config.get('PLBERT_dir', False)
-    plbert = load_plbert(BERT_path)
-    
+
+    with accelerator.main_process_first():
+        # load pretrained ASR model
+        ASR_config = asr_config_path
+        ASR_path = config.get('ASR_path', False)
+        text_aligner = load_ASR_models(
+            ASR_path,
+            ASR_config,
+            dictionary_path=dictionary_source,
+            dictionary_config=dictionary_settings,
+        )
+
+        # load pretrained F0 model
+        F0_path = config.get('F0_path', False)
+        F0_config = config.get('F0_config') or None
+        pitch_extractor = load_F0_models(F0_path, F0_config)
+
+        # load PL-BERT model
+        BERT_path = config.get('PLBERT_dir', False)
+        plbert = load_plbert(BERT_path)
+
     # build model
     model_params = recursive_munch(config['model_params'])
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
-    _ = [model[key].to(device) for key in model]
-    
-    # DP
+
     for key in model:
-        if key != "mpd" and key != "msd" and key != "wd":
-            model[key] = MyDataParallel(model[key])
+        model[key] = accelerator.prepare(model[key])
+
+    train_dataloader, val_dataloader = accelerator.prepare(
+        train_dataloader, val_dataloader
+    )
+
+    _ = [model[key].to(device) for key in model]
             
     start_epoch = 0
     iters = 0
@@ -213,9 +223,9 @@ def main(config_path):
     if not load_pretrained:
         if config.get('first_stage_path', '') != '':
             first_stage_path = os.path.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
-            print('Loading the first stage model at %s ...' % first_stage_path)
-            model, _, start_epoch, iters = load_checkpoint(model, 
-                None, 
+            accelerator.print('Loading the first stage model at %s ...' % first_stage_path)
+            model, _, start_epoch, iters = load_checkpoint(model,
+                None,
                 first_stage_path,
                 load_only_params=True,
                 ignore_modules=['bert', 'bert_encoder', 'predictor', 'predictor_encoder', 'msd', 'mpd', 'wd', 'diffusion']) # keep starting epoch for tensorboard log
@@ -224,10 +234,12 @@ def main(config_path):
             diff_epoch += start_epoch
             joint_epoch += start_epoch
             epochs += start_epoch
-            
-            model.predictor_encoder = copy.deepcopy(model.style_encoder)
+
+            accelerator.unwrap_model(model.predictor_encoder).load_state_dict(
+                accelerator.unwrap_model(model.style_encoder).state_dict()
+            )
         else:
-            raise ValueError('You need to specify the path to the first stage model.') 
+            raise ValueError('You need to specify the path to the first stage model.')
 
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
@@ -244,10 +256,6 @@ def main(config_path):
         hop_length=slm_hop_length,
     ).to(device)
 
-    gl = MyDataParallel(gl)
-    dl = MyDataParallel(dl)
-    wl = MyDataParallel(wl)
-    
     sampler = DiffusionSampler(
         model.diffusion.diffusion,
         sampler=ADPM2Sampler(),
@@ -268,6 +276,10 @@ def main(config_path):
     
     optimizer = build_optimizer({key: model[key].parameters() for key in model},
                                           scheduler_params_dict=scheduler_params_dict, lr=optimizer_params.lr)
+
+    for k, opt in optimizer.optimizers.items():
+        optimizer.optimizers[k] = accelerator.prepare(opt)
+        optimizer.schedulers[k] = accelerator.prepare(optimizer.schedulers[k])
     
     # adjust BERT learning rate
     for g in optimizer.optimizers['bert'].param_groups:
@@ -292,30 +304,36 @@ def main(config_path):
                                     load_only_params=config.get('load_only_params', True))
         # advance start epoch or we'd re-train and rewrite the last epoch file
         start_epoch += 1
-        print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
-        
-    n_down = model.text_aligner.n_down
+        accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
+
+    try:
+        n_down = model.text_aligner.module.n_down
+    except AttributeError:
+        n_down = model.text_aligner.n_down
 
     best_loss = float('inf')  # best test loss
     iters = 0
-    torch.cuda.empty_cache()
-    
+    if device.type == 'cuda':
+        torch.cuda.empty_cache()
+
     stft_loss = MultiResolutionSTFTLoss().to(device)
-    
-    print('BERT', optimizer.optimizers['bert'])
-    print('decoder', optimizer.optimizers['decoder'])
+
+    if accelerator.is_main_process:
+        accelerator.print('BERT %s' % optimizer.optimizers['bert'])
+        accelerator.print('decoder %s' % optimizer.optimizers['decoder'])
 
     start_ds = False
     
     running_std = []
     
     slmadv_params = Munch(config['slmadv_params'])
-    slmadv = SLMAdversarialLoss(model, wl, sampler, 
-                                slmadv_params.min_len, 
+    slmadv = SLMAdversarialLoss(model, wl, sampler,
+                                slmadv_params.min_len,
                                 slmadv_params.max_len,
                                 batch_percentage=slmadv_params.batch_percentage,
-                                skip_update=slmadv_params.iter, 
-                                sig=slmadv_params.sig
+                                skip_update=slmadv_params.iter,
+                                sig=slmadv_params.sig,
+                                accelerator=accelerator,
                                )
 
 
@@ -483,7 +501,7 @@ def main(config_path):
             if start_ds:
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach(), y_rec.detach()).mean()
-                d_loss.backward()
+                accelerator.backward(d_loss)
                 optimizer.step('msd')
                 optimizer.step('mpd')
             else:
@@ -526,8 +544,8 @@ def main(config_path):
                      loss_params.lambda_sty * loss_sty + \
                      loss_params.lambda_diff * loss_diff
 
-            running_loss += loss_mel.item()
-            g_loss.backward()
+            running_loss += accelerator.reduce(loss_mel.detach(), reduction='mean').item()
+            accelerator.backward(g_loss)
 
             optimizer.step('bert_encoder')
             optimizer.step('bert')
@@ -537,106 +555,162 @@ def main(config_path):
             if epoch >= diff_epoch:
                 optimizer.step('diffusion')
             
+            d_loss_slm = torch.zeros(1, device=device).squeeze()
+            loss_gen_lm = torch.zeros(1, device=device).squeeze()
+
             if epoch >= joint_epoch:
                 optimizer.step('style_encoder')
                 optimizer.step('decoder')
-        
-                # randomly pick whether to use in-distribution text
-                if np.random.rand() < 0.5:
-                    use_ind = True
-                else:
-                    use_ind = False
+
+                use_ind = bool(np.random.rand() < 0.5)
 
                 if use_ind:
                     ref_lengths = input_lengths
                     ref_texts = texts
-                    
-                slm_out = slmadv(i, 
-                                 y_rec_gt, 
-                                 y_rec_gt_pred, 
-                                 waves, 
-                                 mel_input_length,
-                                 ref_texts, 
-                                 ref_lengths, use_ind, s_trg.detach(), ref if multispeaker else None)
+
+                try:
+                    slm_out = slmadv(
+                        i,
+                        y_rec_gt,
+                        y_rec_gt_pred,
+                        waves,
+                        mel_input_length,
+                        ref_texts,
+                        ref_lengths,
+                        use_ind,
+                        s_trg.detach(),
+                        ref if multispeaker else None,
+                    )
+                except SkipSLMAdversarialUpdate:
+                    slm_out = None
 
                 if slm_out is None:
                     continue
-                    
+
                 d_loss_slm, loss_gen_lm, y_pred = slm_out
-                
-                # SLM generator loss
-                optimizer.zero_grad()
-                loss_gen_lm.backward()
+                if not torch.is_tensor(d_loss_slm):
+                    d_loss_slm = torch.tensor(float(d_loss_slm), device=device)
+                else:
+                    d_loss_slm = d_loss_slm.to(device)
 
-                # compute the gradient norm
-                total_norm = {}
-                for key in model.keys():
-                    total_norm[key] = 0
-                    parameters = [p for p in model[key].parameters() if p.grad is not None and p.requires_grad]
-                    for p in parameters:
-                        param_norm = p.grad.detach().data.norm(2)
-                        total_norm[key] += param_norm.item() ** 2
-                    total_norm[key] = total_norm[key] ** 0.5
+                if not torch.is_tensor(loss_gen_lm):
+                    loss_gen_lm = torch.tensor(float(loss_gen_lm), device=device)
+                else:
+                    loss_gen_lm = loss_gen_lm.to(device)
 
-                # gradient scaling
-                if total_norm['predictor'] > slmadv_params.thresh:
-                    for key in model.keys():
-                        for p in model[key].parameters():
-                            if p.grad is not None:
-                                p.grad *= (1 / total_norm['predictor']) 
-
-                for p in model.predictor.duration_proj.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.predictor.lstm.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                for p in model.diffusion.parameters():
-                    if p.grad is not None:
-                        p.grad *= slmadv_params.scale
-
-                optimizer.step('bert_encoder')
-                optimizer.step('bert')
-                optimizer.step('predictor')
-                optimizer.step('diffusion')
-
-                # SLM discriminator loss
-                if d_loss_slm != 0:
+                if d_loss_slm.detach().item() != 0:
                     optimizer.zero_grad()
-                    d_loss_slm.backward(retain_graph=True)
+                    accelerator.backward(d_loss_slm)
                     optimizer.step('wd')
+                    loss_gen_lm = torch.zeros(1, device=device).squeeze()
+                else:
+                    optimizer.zero_grad()
+                    accelerator.backward(loss_gen_lm)
 
-            else:
-                d_loss_slm, loss_gen_lm = 0, 0
+                    total_norm = {}
+                    for key in model.keys():
+                        total_norm[key] = 0
+                        parameters = [p for p in model[key].parameters() if p.grad is not None and p.requires_grad]
+                        for p in parameters:
+                            param_norm = p.grad.detach().data.norm(2)
+                            total_norm[key] += param_norm.item() ** 2
+                        total_norm[key] = total_norm[key] ** 0.5
+
+                    if total_norm['predictor'] > slmadv_params.thresh:
+                        for key in model.keys():
+                            for p in model[key].parameters():
+                                if p.grad is not None:
+                                    p.grad *= (1 / total_norm['predictor'])
+
+                    for p in model.predictor.duration_proj.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    for p in model.predictor.lstm.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    for p in model.diffusion.parameters():
+                        if p.grad is not None:
+                            p.grad *= slmadv_params.scale
+
+                    optimizer.step('bert_encoder')
+                    optimizer.step('bert')
+                    optimizer.step('predictor')
+                    if epoch >= diff_epoch:
+                        optimizer.step('diffusion')
                 
             iters = iters + 1
             
             if (i+1)%log_interval == 0:
-                logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f'
-                    %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm))
-                
-                writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
-                writer.add_scalar('train/gen_loss', loss_gen_all, iters)
-                writer.add_scalar('train/d_loss', d_loss, iters)
-                writer.add_scalar('train/ce_loss', loss_ce, iters)
-                writer.add_scalar('train/dur_loss', loss_dur, iters)
-                writer.add_scalar('train/slm_loss', loss_lm, iters)
-                writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
-                writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
-                writer.add_scalar('train/sty_loss', loss_sty, iters)
-                writer.add_scalar('train/diff_loss', loss_diff, iters)
-                writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
-                writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
-                
+                def _to_tensor(val):
+                    if isinstance(val, torch.Tensor):
+                        return val.detach().to(device=device, dtype=torch.float32)
+                    return torch.tensor(val, device=device, dtype=torch.float32)
+
+                scalars = {
+                    'running_loss': running_loss / log_interval,
+                    'd_loss': d_loss,
+                    'loss_dur': loss_dur,
+                    'loss_ce': loss_ce,
+                    'loss_norm_rec': loss_norm_rec,
+                    'loss_F0_rec': loss_F0_rec,
+                    'loss_lm': loss_lm,
+                    'loss_gen_all': loss_gen_all,
+                    'loss_sty': loss_sty,
+                    'loss_diff': loss_diff,
+                    'd_loss_slm': d_loss_slm,
+                    'loss_gen_lm': loss_gen_lm,
+                }
+                reduced_scalars = {
+                    key: accelerator.reduce(_to_tensor(value), reduction='mean').item()
+                    for key, value in scalars.items()
+                }
+
+                if accelerator.is_main_process:
+                    logger.info(
+                        'Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f'
+                        % (
+                            epoch+1,
+                            epochs,
+                            i+1,
+                            len(train_list)//batch_size,
+                            reduced_scalars['running_loss'],
+                            reduced_scalars['d_loss'],
+                            reduced_scalars['loss_dur'],
+                            reduced_scalars['loss_ce'],
+                            reduced_scalars['loss_norm_rec'],
+                            reduced_scalars['loss_F0_rec'],
+                            reduced_scalars['loss_lm'],
+                            reduced_scalars['loss_gen_all'],
+                            reduced_scalars['loss_sty'],
+                            reduced_scalars['loss_diff'],
+                            reduced_scalars['d_loss_slm'],
+                            reduced_scalars['loss_gen_lm'],
+                        )
+                    )
+
+                    if writer is not None:
+                        writer.add_scalar('train/mel_loss', reduced_scalars['running_loss'], iters)
+                        writer.add_scalar('train/gen_loss', reduced_scalars['loss_gen_all'], iters)
+                        writer.add_scalar('train/d_loss', reduced_scalars['d_loss'], iters)
+                        writer.add_scalar('train/ce_loss', reduced_scalars['loss_ce'], iters)
+                        writer.add_scalar('train/dur_loss', reduced_scalars['loss_dur'], iters)
+                        writer.add_scalar('train/slm_loss', reduced_scalars['loss_lm'], iters)
+                        writer.add_scalar('train/norm_loss', reduced_scalars['loss_norm_rec'], iters)
+                        writer.add_scalar('train/F0_loss', reduced_scalars['loss_F0_rec'], iters)
+                        writer.add_scalar('train/sty_loss', reduced_scalars['loss_sty'], iters)
+                        writer.add_scalar('train/diff_loss', reduced_scalars['loss_diff'], iters)
+                        writer.add_scalar('train/d_loss_slm', reduced_scalars['d_loss_slm'], iters)
+                        writer.add_scalar('train/gen_loss_slm', reduced_scalars['loss_gen_lm'], iters)
+
+                    accelerator.print('Time elapsed: %s' % (time.time()-start_time))
+
                 running_loss = 0
                 
-                print('Time elasped:', time.time()-start_time)
-                
-        loss_test = 0
-        loss_align = 0
-        loss_f = 0
+        loss_test = 0.0
+        loss_align = 0.0
+        loss_f = 0.0
         _ = [model[key].eval() for key in model]
 
         with torch.no_grad():
@@ -649,7 +723,7 @@ def main(config_path):
                     batch = [b.to(device) for b in batch[1:]]
                     texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
                     with torch.no_grad():
-                        mask = length_to_mask(mel_input_length // (2 ** n_down)).to('cuda')
+                        mask = length_to_mask(mel_input_length // (2 ** n_down)).to(device)
                         text_mask = length_to_mask(input_lengths).to(texts.device)
 
                         _, _, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
@@ -738,127 +812,142 @@ def main(config_path):
 
                     loss_F0 = F.l1_loss(F0_real, F0_fake) / 10
 
-                    loss_test += (loss_mel).mean()
-                    loss_align += (loss_dur).mean()
-                    loss_f += (loss_F0).mean()
+                    loss_test += loss_mel.mean().item()
+                    loss_align += loss_dur.mean().item()
+                    loss_f += loss_F0.mean().item()
 
                     iters_test += 1
                 except Exception as e:
-                    print(f"Encountered exception: {e}")
-                    traceback.print_exc()
+                    if accelerator.is_main_process:
+                        accelerator.print(f"Encountered exception: {e}")
+                        traceback.print_exc()
                     continue
 
-        print('Epochs:', epoch + 1)
-        logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (loss_test / iters_test, loss_align / iters_test, loss_f / iters_test) + '\n\n\n')
-        print('\n\n\n')
-        writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/dur_loss', loss_align / iters_test, epoch + 1)
-        writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
+        loss_test_tensor = torch.tensor([loss_test], device=device, dtype=torch.float32)
+        loss_align_tensor = torch.tensor([loss_align], device=device, dtype=torch.float32)
+        loss_f_tensor = torch.tensor([loss_f], device=device, dtype=torch.float32)
+        iters_test_tensor = torch.tensor([iters_test], device=device, dtype=torch.float32)
+
+        total_loss_test = accelerator.reduce(loss_test_tensor, reduction='sum').item()
+        total_loss_align = accelerator.reduce(loss_align_tensor, reduction='sum').item()
+        total_loss_f = accelerator.reduce(loss_f_tensor, reduction='sum').item()
+        total_iters = accelerator.reduce(iters_test_tensor, reduction='sum').item()
+
+        total_iters = max(total_iters, 1.0)
+
+        avg_loss_test = total_loss_test / total_iters
+        avg_loss_align = total_loss_align / total_iters
+        avg_loss_f = total_loss_f / total_iters
+
+        accelerator.print('Epochs:', epoch + 1)
+        if accelerator.is_main_process:
+            logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (avg_loss_test, avg_loss_align, avg_loss_f) + '\n\n\n')
+            if writer is not None:
+                writer.add_scalar('eval/mel_loss', avg_loss_test, epoch + 1)
+                writer.add_scalar('eval/dur_loss', avg_loss_align, epoch + 1)
+                writer.add_scalar('eval/F0_loss', avg_loss_f, epoch + 1)
         
-        if epoch < joint_epoch:
-            # generating reconstruction examples with GT duration
-            
-            with torch.no_grad():
-                for bib in range(len(asr)):
-                    mel_length = int(mel_input_length[bib].item())
-                    gt = mels[bib, :, :mel_length].unsqueeze(0)
-                    en = asr[bib, :, :mel_length // 2].unsqueeze(0)
+        if accelerator.is_main_process and writer is not None:
+            if epoch < joint_epoch:
+                with torch.no_grad():
+                    for bib in range(len(asr)):
+                        mel_length = int(mel_input_length[bib].item())
+                        gt = mels[bib, :, :mel_length].unsqueeze(0)
+                        en = asr[bib, :, :mel_length // 2].unsqueeze(0)
 
-                    F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
-                    s = model.style_encoder(gt.unsqueeze(1))
-                    real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
+                        F0_real, _, _ = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
+                        s = model.style_encoder(gt.unsqueeze(1))
+                        real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
 
-                    y_rec = model.decoder(en, F0_real, real_norm, s)
+                        y_rec = model.decoder(en, F0_real, real_norm, s)
 
-                    writer.add_audio('eval/y' + str(bib), y_rec.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+                        writer.add_audio('eval/y' + str(bib), y_rec.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
-                    s_dur = model.predictor_encoder(gt.unsqueeze(1))
-                    p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
+                        s_dur = model.predictor_encoder(gt.unsqueeze(1))
+                        p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
 
-                    F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
+                        F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
 
-                    y_pred = model.decoder(en, F0_fake, N_fake, s)
+                        y_pred = model.decoder(en, F0_fake, N_fake, s)
 
-                    writer.add_audio('pred/y' + str(bib), y_pred.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+                        writer.add_audio('pred/y' + str(bib), y_pred.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
-                    if epoch == 0:
-                        writer.add_audio('gt/y' + str(bib), waves[bib].squeeze(), epoch, sample_rate=sr)
+                        if epoch == 0:
+                            writer.add_audio('gt/y' + str(bib), waves[bib].squeeze(), epoch, sample_rate=sr)
 
-                    if bib >= 5:
-                        break
-        else:
-            # generating sampled speech from text directly
-            with torch.no_grad():
-                # compute reference styles
-                if multispeaker and epoch >= diff_epoch:
-                    ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
-                    ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
-                    ref_s = torch.cat([ref_ss, ref_sp], dim=1)
-                    
-                for bib in range(len(d_en)):
-                    if multispeaker:
-                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device), 
-                              embedding=bert_dur[bib].unsqueeze(0),
-                              embedding_scale=1,
-                                features=ref_s[bib].unsqueeze(0), # reference from the same speaker as the embedding
-                                 num_steps=5).squeeze(1)
-                    else:
-                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device), 
-                              embedding=bert_dur[bib].unsqueeze(0),
-                              embedding_scale=1,
-                                 num_steps=5).squeeze(1)
+                        if bib >= 5:
+                            break
+            else:
+                with torch.no_grad():
+                    if multispeaker and epoch >= diff_epoch:
+                        ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
+                        ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
+                        ref_s = torch.cat([ref_ss, ref_sp], dim=1)
 
-                    s = s_pred[:, 128:]
-                    ref = s_pred[:, :128]
+                    for bib in range(len(d_en)):
+                        if multispeaker:
+                            s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                                  embedding=bert_dur[bib].unsqueeze(0),
+                                  embedding_scale=1,
+                                    features=ref_s[bib].unsqueeze(0),
+                                     num_steps=5).squeeze(1)
+                        else:
+                            s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                                  embedding=bert_dur[bib].unsqueeze(0),
+                                  embedding_scale=1,
+                                     num_steps=5).squeeze(1)
 
-                    d = model.predictor.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0), 
-                                                     s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
+                        s = s_pred[:, 128:]
+                        ref = s_pred[:, :128]
 
-                    x, _ = model.predictor.lstm(d)
-                    duration = model.predictor.duration_proj(x)
+                        d = model.predictor.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
+                                                         s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
 
-                    duration = torch.sigmoid(duration).sum(axis=-1)
-                    pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+                        x, _ = model.predictor.lstm(d)
+                        duration = model.predictor.duration_proj(x)
 
-                    pred_dur[-1] += 5
+                        duration = torch.sigmoid(duration).sum(axis=-1)
+                        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
-                    pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
-                    c_frame = 0
-                    for i in range(pred_aln_trg.size(0)):
-                        pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
-                        c_frame += int(pred_dur[i].data)
+                        pred_dur[-1] += 5
 
-                    # encode prosody
-                    en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
-                    F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
-                    out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)), 
-                                            F0_pred, N_pred, ref.squeeze().unsqueeze(0))
+                        pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
+                        c_frame = 0
+                        for i in range(pred_aln_trg.size(0)):
+                            pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
+                            c_frame += int(pred_dur[i].data)
 
-                    writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+                        en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
+                        F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
+                        out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)),
+                                                F0_pred, N_pred, ref.squeeze().unsqueeze(0))
 
-                    if bib >= 5:
-                        break
-                            
-        if epoch % save_frequency == 0:
-            if (loss_test / iters_test) < best_loss:
-                best_loss = loss_test / iters_test
-            print('Saving..')
+                        writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+
+                        if bib >= 5:
+                            break
+
+        if epoch % save_frequency == 0 and accelerator.is_main_process:
+            if avg_loss_test < best_loss:
+                best_loss = avg_loss_test
+            accelerator.print('Saving..')
             state = {
-                'net':  {key: model[key].state_dict() for key in model}, 
+                'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
                 'optimizer': optimizer.state_dict(),
                 'iters': iters,
-                'val_loss': loss_test / iters_test,
+                'val_loss': avg_loss_test,
                 'epoch': epoch,
             }
             save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
             torch.save(state, save_path)
-            
-            # if estimate sigma, save the estimated simga
+
             if model_params.diffusion.dist.estimate_sigma_data:
                 config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
-                
+
                 with open(os.path.join(log_dir, os.path.basename(config_path)), 'w') as outfile:
                     yaml.dump(config, outfile, default_flow_style=True)
+
+        accelerator.wait_for_everyone()
         
 if __name__=="__main__":
     main()
