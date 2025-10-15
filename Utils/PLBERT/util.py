@@ -5,6 +5,14 @@ import torch.nn as nn
 from transformers import AlbertConfig, AlbertModel
 
 class CustomAlbert(AlbertModel):
+    def __init__(self, config):
+        super().__init__(config)
+
+        # Drop the unused pooler so DDP does not expect gradients for it.
+        self.pooler = None
+        if hasattr(self, "pooler_activation"):
+            self.pooler_activation = nn.Identity()
+
     def forward(self, *args, **kwargs):
         # Call the original forward method
         outputs = super().forward(*args, **kwargs)
@@ -48,6 +56,8 @@ def load_plbert(log_dir):
     # keeps the distributed graph consistent without the performance penalty of
     # enabling unused-parameter detection.
     if hasattr(bert, "pooler"):
-        bert.pooler = nn.Identity()
+        bert.pooler = None
+    if hasattr(bert, "pooler_activation"):
+        bert.pooler_activation = nn.Identity()
 
     return bert
