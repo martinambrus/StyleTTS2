@@ -656,6 +656,7 @@ def main(config_path):
                     loss_gen_lm = torch.zeros(1, device=device)
                     loss_gen_lm_value = 0.0
                     d_loss_slm_value = 0.0
+                    should_run_discriminator = False
                 else:
                     d_loss_slm, loss_gen_lm, y_pred = slm_out
 
@@ -665,7 +666,22 @@ def main(config_path):
                     loss_gen_lm_value = accelerator.gather(loss_gen_lm.detach()).mean().item()
                     d_loss_slm_value = accelerator.gather(d_loss_slm.detach()).mean().item()
 
-                    if d_loss_slm.item() == 0:
+                    disc_flag = torch.tensor(
+                        1 if torch.any(d_loss_slm.detach() != 0) else 0,
+                        device=device,
+                        dtype=torch.int,
+                    )
+                    if accelerator.num_processes > 1:
+                        disc_flag = accelerator.gather(disc_flag)
+                        should_run_discriminator = bool(disc_flag.max().item())
+                    else:
+                        should_run_discriminator = bool(disc_flag.item())
+
+                    if should_run_discriminator:
+                        optimizer.zero_grad()
+                        accelerator.backward(d_loss_slm)
+                        optimizer.step('wd')
+                    else:
                         optimizer.zero_grad()
                         accelerator.backward(loss_gen_lm)
 
@@ -701,10 +717,8 @@ def main(config_path):
                         optimizer.step('bert')
                         optimizer.step('predictor')
                         optimizer.step('diffusion')
-                    else:
-                        optimizer.zero_grad()
-                        accelerator.backward(d_loss_slm)
-                        optimizer.step('wd')
+                if slm_out is None:
+                    should_run_discriminator = False
 
             else:
                 d_loss_slm = torch.zeros(1, device=device)
