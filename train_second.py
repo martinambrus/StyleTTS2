@@ -11,6 +11,7 @@ from monotonic_align import mask_from_lens
 from munch import Munch
 from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
+from accelerate.utils import set_seed
 from accelerate.logging import get_logger
 
 import logging
@@ -23,6 +24,7 @@ import click
 import shutil
 import traceback
 import torch.nn.functional as F
+import random
 
 from phoneme_dictionary import resolve_phoneme_dictionary_settings
 
@@ -101,6 +103,14 @@ def main(config_path):
 
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+
+    seed = config.get('seed', 42)
+    set_seed(seed, device_specific=False)
+    np.random.seed(seed)
+    random.seed(seed)
+
+    if accelerator.is_main_process:
+        logger.info("Using global seed %d", seed)
 
     if accelerator.is_main_process:
         shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
@@ -211,6 +221,9 @@ def main(config_path):
     train_dataloader, val_dataloader = accelerator.prepare(
         train_dataloader, val_dataloader
     )
+
+    diffusion_module = accelerator.unwrap_model(model['diffusion'])
+    diffusion_impl = getattr(diffusion_module, 'diffusion', diffusion_module)
             
     start_epoch = 0
     iters = 0
@@ -257,7 +270,7 @@ def main(config_path):
     ).to(device)
     
     sampler = DiffusionSampler(
-        model.diffusion.diffusion,
+        diffusion_impl,
         sampler=ADPM2Sampler(),
         sigma_schedule=KarrasSchedule(sigma_min=0.0001, sigma_max=3.0, rho=9.0), # empirical parameters
         clamp=False
@@ -313,10 +326,8 @@ def main(config_path):
         start_epoch += 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
-    try:
-        n_down = model.text_aligner.module.n_down
-    except AttributeError:
-        n_down = model.text_aligner.n_down
+    text_aligner_module = accelerator.unwrap_model(model['text_aligner'])
+    n_down = getattr(text_aligner_module, 'n_down')
 
     best_loss = float('inf')  # best test loss
     iters = 0
@@ -418,8 +429,8 @@ def main(config_path):
                 num_steps = np.random.randint(3, 5)
 
                 if model_params.diffusion.dist.estimate_sigma_data:
-                    model.diffusion.module.diffusion.sigma_data = s_trg.std(axis=-1).mean().item()  # batch-wise std estimation
-                    running_std.append(model.diffusion.module.diffusion.sigma_data)
+                    diffusion_impl.sigma_data = s_trg.std(axis=-1).mean().item()  # batch-wise std estimation
+                    running_std.append(diffusion_impl.sigma_data)
 
                 if multispeaker:
                     s_preds = sampler(
@@ -440,7 +451,7 @@ def main(config_path):
                         embedding_mask_proba=0.1,
                         num_steps=num_steps,
                     ).squeeze(1)
-                    loss_diff = model.diffusion.module.diffusion(s_trg.unsqueeze(1), embedding=bert_dur).mean()
+                    loss_diff = diffusion_impl(s_trg.unsqueeze(1), embedding=bert_dur).mean()
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
             else:
                 loss_sty = torch.zeros(1, device=device)
