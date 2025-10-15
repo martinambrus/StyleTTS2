@@ -30,6 +30,12 @@ from phoneme_dictionary import resolve_phoneme_dictionary_settings
 
 
 
+def _clone_if_grad(tensor, *, force=False):
+    if isinstance(tensor, torch.Tensor) and (force or tensor.requires_grad):
+        return tensor.clone()
+    return tensor
+
+
 def _run_pitch_extractor(extractor, mel):
     outputs = extractor(mel)
     classifier = outputs
@@ -431,12 +437,8 @@ def main(config_path):
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            if bert_dur.requires_grad:
-                bert_dur = bert_dur.clone()
-            if bert_dur.requires_grad:
-                bert_dur_sampler = bert_dur.detach().clone()
-            else:
-                bert_dur_sampler = bert_dur
+            bert_dur = _clone_if_grad(bert_dur)
+            bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
             
             # denoiser training
@@ -534,7 +536,7 @@ def main(config_path):
                     # ground truth from reconstruction
                     wav = y_rec_gt_pred # use reconstruction since decoder is fixed
 
-            F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s_dur)
+            F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s_dur))
 
             y_rec = model.decoder(en, F0_fake, N_fake, s)
 
@@ -823,7 +825,7 @@ def main(config_path):
 
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
-                    F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s)
+                    F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s))
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
@@ -895,7 +897,7 @@ def main(config_path):
                         s_dur = model.predictor_encoder(gt.unsqueeze(1))
                         p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
 
-                        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s_dur)
+                        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s_dur))
 
                         y_pred = model.decoder(en, F0_fake, N_fake, s)
 
@@ -950,7 +952,7 @@ def main(config_path):
 
                     # encode prosody
                     en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
-                    F0_pred, N_pred = predictor_module.F0Ntrain(en, s)
+                    F0_pred, N_pred = predictor_module.F0Ntrain(en, _clone_if_grad(s))
                     out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)), 
                                             F0_pred, N_pred, ref.squeeze().unsqueeze(0))
 

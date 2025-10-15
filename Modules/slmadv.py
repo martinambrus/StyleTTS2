@@ -3,6 +3,12 @@ import numpy as np
 import torch.nn.functional as F
 
 
+def _clone_if_grad(tensor, *, force=False):
+    if isinstance(tensor, torch.Tensor) and (force or tensor.requires_grad):
+        return tensor.clone()
+    return tensor
+
+
 class SkipSLMAdversarial(Exception):
     pass
 
@@ -46,12 +52,8 @@ class SLMAdversarialLoss(torch.nn.Module):
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        if bert_dur.requires_grad:
-            bert_dur = bert_dur.clone()
-        if bert_dur.requires_grad:
-            bert_dur_sampler = bert_dur.detach().clone()
-        else:
-            bert_dur_sampler = bert_dur
+        bert_dur = _clone_if_grad(bert_dur)
+        bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
         
         if use_ind and np.random.rand() < 0.5:
@@ -170,8 +172,11 @@ class SLMAdversarialLoss(torch.nn.Module):
         predictor_module = self._module('predictor')
         decoder_module = self._module('decoder')
 
-        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, sp[:, 128:])
-        y_pred = decoder_module(en, F0_fake, N_fake, sp[:, :128])
+        prosody_style = _clone_if_grad(sp[:, 128:])
+        acoustic_style = _clone_if_grad(sp[:, :128])
+
+        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, prosody_style)
+        y_pred = decoder_module(en, F0_fake, N_fake, acoustic_style)
         
         # discriminator loss
         if (iters + 1) % self.skip_update == 0:
