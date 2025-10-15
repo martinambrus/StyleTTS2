@@ -454,12 +454,14 @@ def main(config_path):
                         noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
                         embedding=bert_dur_sampler,
                         embedding_scale=1,
-                        features=ref,
+                        features=_clone_if_grad(ref, force=True),
                         embedding_mask_proba=0.1,
                         num_steps=num_steps,
                     ).squeeze(1)
                     loss_diff = model.diffusion(
-                        s_trg.unsqueeze(1), embedding=bert_dur, features=ref
+                        s_trg.unsqueeze(1),
+                        embedding=_clone_if_grad(bert_dur),
+                        features=_clone_if_grad(ref),
                     ).mean()
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
                 else:
@@ -471,16 +473,18 @@ def main(config_path):
                         num_steps=num_steps,
                     ).squeeze(1)
                     loss_diff = diffusion_impl(
-                        s_trg.unsqueeze(1), embedding=bert_dur
+                        s_trg.unsqueeze(1), embedding=_clone_if_grad(bert_dur)
                     ).mean()
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
             else:
                 loss_sty = torch.zeros(1, device=device)
                 loss_diff = torch.zeros(1, device=device)
 
-            d, p = model.predictor(d_en, s_dur, 
-                                                    input_lengths, 
-                                                    s2s_attn_mono, 
+            d, p = model.predictor(
+                _clone_if_grad(d_en),
+                _clone_if_grad(s_dur),
+                                                    input_lengths,
+                                                    s2s_attn_mono,
                                                     text_mask)
             
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
@@ -527,7 +531,9 @@ def main(config_path):
                 N_real = log_norm(gt.unsqueeze(1)).squeeze(1)
                 
                 y_rec_gt = wav.unsqueeze(1)
-                y_rec_gt_pred = model.decoder(en, F0_real, N_real, s)
+                y_rec_gt_pred = model.decoder(
+                    _clone_if_grad(en), F0_real, N_real, _clone_if_grad(s)
+                )
 
                 if epoch >= joint_epoch:
                     # ground truth from recording
@@ -536,9 +542,13 @@ def main(config_path):
                     # ground truth from reconstruction
                     wav = y_rec_gt_pred # use reconstruction since decoder is fixed
 
-            F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s_dur))
+            F0_fake, N_fake = predictor_module.F0Ntrain(
+                _clone_if_grad(p_en), _clone_if_grad(s_dur)
+            )
 
-            y_rec = model.decoder(en, F0_fake, N_fake, s)
+            y_rec = model.decoder(
+                _clone_if_grad(en), F0_fake, N_fake, _clone_if_grad(s)
+            )
 
             loss_F0_rec =  (F.smooth_l1_loss(F0_real, F0_fake)) / 10
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
@@ -842,7 +852,9 @@ def main(config_path):
 
                     s = model.style_encoder(gt.unsqueeze(1))
 
-                    y_rec = model.decoder(en, F0_fake, N_fake, s)
+                    y_rec = model.decoder(
+                        _clone_if_grad(en), F0_fake, N_fake, _clone_if_grad(s)
+                    )
                     loss_mel = stft_loss(y_rec.squeeze(), wav.detach())
 
                     F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1)) 
@@ -890,7 +902,9 @@ def main(config_path):
                         s = model.style_encoder(gt.unsqueeze(1))
                         real_norm = log_norm(gt.unsqueeze(1)).squeeze(1)
 
-                        y_rec = model.decoder(en, F0_real, real_norm, s)
+                        y_rec = model.decoder(
+                            _clone_if_grad(en), F0_real, real_norm, _clone_if_grad(s)
+                        )
 
                         writer.add_audio('eval/y' + str(bib), y_rec.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
@@ -899,7 +913,9 @@ def main(config_path):
 
                         F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s_dur))
 
-                        y_pred = model.decoder(en, F0_fake, N_fake, s)
+                        y_pred = model.decoder(
+                            _clone_if_grad(en), F0_fake, N_fake, _clone_if_grad(s)
+                        )
 
                         writer.add_audio('pred/y' + str(bib), y_pred.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
@@ -951,10 +967,24 @@ def main(config_path):
                         c_frame += int(pred_dur[i].data)
 
                     # encode prosody
-                    en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
-                    F0_pred, N_pred = predictor_module.F0Ntrain(en, _clone_if_grad(s))
-                    out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)), 
-                                            F0_pred, N_pred, ref.squeeze().unsqueeze(0))
+                    en = (
+                        d.transpose(-1, -2)
+                        @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                    )
+                    F0_pred, N_pred = predictor_module.F0Ntrain(
+                        _clone_if_grad(en), _clone_if_grad(s)
+                    )
+                    decoder_input = (
+                        t_en[bib, :, :input_lengths[bib]]
+                        .unsqueeze(0)
+                        @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                    )
+                    out = model.decoder(
+                        _clone_if_grad(decoder_input),
+                        F0_pred,
+                        N_pred,
+                        _clone_if_grad(ref.squeeze().unsqueeze(0)),
+                    )
 
                     writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 

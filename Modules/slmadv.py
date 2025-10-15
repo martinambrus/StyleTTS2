@@ -61,12 +61,14 @@ class SLMAdversarialLoss(torch.nn.Module):
         else:
             num_steps = np.random.randint(3, 5)
             if ref_s is not None:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
-                      embedding=bert_dur_sampler,
-                      embedding_scale=1,
-                               features=ref_s, # reference from the same speaker as the embedding
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
+                s_preds = self.sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                    embedding=bert_dur_sampler,
+                    embedding_scale=1,
+                    features=_clone_if_grad(ref_s, force=True),
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
             else:
                 s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
                       embedding=bert_dur_sampler,
@@ -77,10 +79,13 @@ class SLMAdversarialLoss(torch.nn.Module):
         s_dur = s_preds[:, 128:]
         s_preds[:, :128]
         
-        d, _ = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device), 
-                                                text_mask)
+        d, _ = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device),
+            text_mask,
+        )
         
         bib = 0
 
@@ -121,10 +126,13 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         asr_pred = t_en @ s2s_attn
 
-        _, p_pred = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                s2s_attn, 
-                                                text_mask)
+        _, p_pred = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            s2s_attn,
+            text_mask,
+        )
         
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
@@ -175,8 +183,12 @@ class SLMAdversarialLoss(torch.nn.Module):
         prosody_style = _clone_if_grad(sp[:, 128:])
         acoustic_style = _clone_if_grad(sp[:, :128])
 
-        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, prosody_style)
-        y_pred = decoder_module(en, F0_fake, N_fake, acoustic_style)
+        F0_fake, N_fake = predictor_module.F0Ntrain(
+            _clone_if_grad(p_en), prosody_style
+        )
+        y_pred = decoder_module(
+            _clone_if_grad(en), F0_fake, N_fake, acoustic_style
+        )
         
         # discriminator loss
         if (iters + 1) % self.skip_update == 0:
