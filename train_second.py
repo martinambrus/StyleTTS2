@@ -431,7 +431,8 @@ def main(config_path):
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            d_en = model.bert_encoder(bert_dur).transpose(-1, -2) 
+            bert_dur_sampler = bert_dur.clone() if bert_dur.requires_grad else bert_dur
+            d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
             
             # denoiser training
             if epoch >= diff_epoch:
@@ -444,23 +445,27 @@ def main(config_path):
                 if multispeaker:
                     s_preds = sampler(
                         noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
-                        embedding=bert_dur,
+                        embedding=bert_dur_sampler,
                         embedding_scale=1,
                         features=ref,
                         embedding_mask_proba=0.1,
                         num_steps=num_steps,
                     ).squeeze(1)
-                    loss_diff = model.diffusion(s_trg.unsqueeze(1), embedding=bert_dur, features=ref).mean()
+                    loss_diff = model.diffusion(
+                        s_trg.unsqueeze(1), embedding=bert_dur, features=ref
+                    ).mean()
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
                 else:
                     s_preds = sampler(
                         noise=torch.randn_like(s_trg).unsqueeze(1).to(device),
-                        embedding=bert_dur,
+                        embedding=bert_dur_sampler,
                         embedding_scale=1,
                         embedding_mask_proba=0.1,
                         num_steps=num_steps,
                     ).squeeze(1)
-                    loss_diff = diffusion_impl(s_trg.unsqueeze(1), embedding=bert_dur).mean()
+                    loss_diff = diffusion_impl(
+                        s_trg.unsqueeze(1), embedding=bert_dur
+                    ).mean()
                     loss_sty = F.l1_loss(s_preds, s_trg.detach())
             else:
                 loss_sty = torch.zeros(1, device=device)
