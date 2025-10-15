@@ -107,7 +107,12 @@ def main(config_path):
     log_dir = config['log_dir']
     os.makedirs(log_dir, exist_ok=True)
 
-    find_unused = config.get('find_unused_parameters', False)
+    # Stage-two training swaps modules in and out of the graph (e.g., SLM adversarial
+    # updates may skip batches entirely).  Keeping ``find_unused_parameters`` enabled
+    # by default prevents DDP from stalling when a module's grads are legitimately
+    # absent for an iteration.  Users can still override the behaviour from the YAML
+    # config if they know their setup never skips parameters.
+    find_unused = config.get('find_unused_parameters', True)
     broadcast_buffers = config.get('broadcast_buffers', False)
     ddp_kwargs = DistributedDataParallelKwargs(
         find_unused_parameters=find_unused,
