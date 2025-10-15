@@ -101,7 +101,8 @@ def main(config_path):
     log_dir = config['log_dir']
     os.makedirs(log_dir, exist_ok=True)
 
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
+    find_unused = config.get('find_unused_parameters', False)
+    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=find_unused)
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
 
     seed = config.get('seed', 42)
@@ -215,14 +216,21 @@ def main(config_path):
 
     steps_per_epoch = len(train_dataloader)
 
+    unwrapped_models = {}
     for key in model:
         model[key] = accelerator.prepare(model[key])
+        try:
+            unwrapped_models[key] = accelerator.unwrap_model(model[key])
+        except Exception:
+            unwrapped_models[key] = model[key]
+
+    predictor_module = unwrapped_models['predictor']
 
     train_dataloader, val_dataloader = accelerator.prepare(
         train_dataloader, val_dataloader
     )
 
-    diffusion_module = accelerator.unwrap_model(model['diffusion'])
+    diffusion_module = unwrapped_models['diffusion']
     diffusion_impl = getattr(diffusion_module, 'diffusion', diffusion_module)
             
     start_epoch = 0
@@ -248,8 +256,8 @@ def main(config_path):
             joint_epoch += start_epoch
             epochs += start_epoch
 
-            style_encoder_module = accelerator.unwrap_model(model['style_encoder'])
-            predictor_encoder_module = accelerator.unwrap_model(model['predictor_encoder'])
+            style_encoder_module = unwrapped_models['style_encoder']
+            predictor_encoder_module = unwrapped_models['predictor_encoder']
             predictor_encoder_module.load_state_dict(style_encoder_module.state_dict())
         else:
             raise ValueError('You need to specify the path to the first stage model.')
@@ -326,7 +334,7 @@ def main(config_path):
         start_epoch += 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
-    text_aligner_module = accelerator.unwrap_model(model['text_aligner'])
+    text_aligner_module = unwrapped_models['text_aligner']
     n_down = getattr(text_aligner_module, 'n_down')
 
     best_loss = float('inf')  # best test loss
@@ -354,6 +362,7 @@ def main(config_path):
         skip_update=slmadv_params.iter,
         sig=slmadv_params.sig,
         accelerator=accelerator,
+        model_unwrapped=unwrapped_models,
     )
 
 
@@ -515,7 +524,7 @@ def main(config_path):
                     # ground truth from reconstruction
                     wav = y_rec_gt_pred # use reconstruction since decoder is fixed
 
-            F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
+            F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s_dur)
 
             y_rec = model.decoder(en, F0_fake, N_fake, s)
 
@@ -645,11 +654,11 @@ def main(config_path):
                                     if p.grad is not None:
                                         p.grad *= scale
 
-                        for p in model.predictor.duration_proj.parameters():
+                        for p in predictor_module.duration_proj.parameters():
                             if p.grad is not None:
                                 p.grad *= slmadv_params.scale
 
-                        for p in model.predictor.lstm.parameters():
+                        for p in predictor_module.lstm.parameters():
                             if p.grad is not None:
                                 p.grad *= slmadv_params.scale
 
@@ -804,7 +813,7 @@ def main(config_path):
 
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
-                    F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s)
+                    F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s)
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
@@ -876,7 +885,7 @@ def main(config_path):
                         s_dur = model.predictor_encoder(gt.unsqueeze(1))
                         p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
 
-                        F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
+                        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, s_dur)
 
                         y_pred = model.decoder(en, F0_fake, N_fake, s)
 
@@ -912,11 +921,11 @@ def main(config_path):
                     s = s_pred[:, 128:]
                     ref = s_pred[:, :128]
 
-                    d = model.predictor.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0), 
+                    d = predictor_module.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
                                                      s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
 
-                    x, _ = model.predictor.lstm(d)
-                    duration = model.predictor.duration_proj(x)
+                    x, _ = predictor_module.lstm(d)
+                    duration = predictor_module.duration_proj(x)
 
                     duration = torch.sigmoid(duration).sum(axis=-1)
                     pred_dur = torch.round(duration.squeeze()).clamp(min=1)
@@ -931,7 +940,7 @@ def main(config_path):
 
                     # encode prosody
                     en = (d.transpose(-1, -2) @ pred_aln_trg.unsqueeze(0).to(texts.device))
-                    F0_pred, N_pred = model.predictor.F0Ntrain(en, s)
+                    F0_pred, N_pred = predictor_module.F0Ntrain(en, s)
                     out = model.decoder((t_en[bib, :, :input_lengths[bib]].unsqueeze(0) @ pred_aln_trg.unsqueeze(0).to(texts.device)), 
                                             F0_pred, N_pred, ref.squeeze().unsqueeze(0))
 

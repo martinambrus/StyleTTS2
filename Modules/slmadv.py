@@ -8,7 +8,19 @@ class SkipSLMAdversarial(Exception):
 
 class SLMAdversarialLoss(torch.nn.Module):
 
-    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5, accelerator=None):
+    def __init__(
+        self,
+        model,
+        wl,
+        sampler,
+        min_len,
+        max_len,
+        batch_percentage=0.5,
+        skip_update=10,
+        sig=1.5,
+        accelerator=None,
+        model_unwrapped=None,
+    ):
         super(SLMAdversarialLoss, self).__init__()
         self.model = model
         self.wl = wl
@@ -21,6 +33,15 @@ class SLMAdversarialLoss(torch.nn.Module):
         self.sig = sig
         self.skip_update = skip_update
         self.accelerator = accelerator
+        self.model_unwrapped = model_unwrapped or {}
+
+    def _module(self, key):
+        if isinstance(self.model_unwrapped, dict) and key in self.model_unwrapped:
+            return self.model_unwrapped[key]
+        module = self.model[key] if isinstance(self.model, dict) else getattr(self.model, key)
+        if hasattr(module, "module"):
+            return module.module
+        return module
         
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
@@ -140,8 +161,11 @@ class SLMAdversarialLoss(torch.nn.Module):
         en = torch.stack(en)
         p_en = torch.stack(p_en)
         
-        F0_fake, N_fake = self.model.predictor.F0Ntrain(p_en, sp[:, 128:])
-        y_pred = self.model.decoder(en, F0_fake, N_fake, sp[:, :128])
+        predictor_module = self._module('predictor')
+        decoder_module = self._module('decoder')
+
+        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, sp[:, 128:])
+        y_pred = decoder_module(en, F0_fake, N_fake, sp[:, :128])
         
         # discriminator loss
         if (iters + 1) % self.skip_update == 0:
