@@ -54,11 +54,12 @@ model_params:
       
   # speech language model config
   slm:
-      model: 'microsoft/wavlm-base-plus'
+      model: 'openai/whisper-base'
       sr: 16000 # sampling rate of SLM
-      hidden: 768 # hidden size of SLM
-      nlayers: 13 # number of layers of SLM
+      hidden: 512 # hidden size of Whisper encoder
+      nlayers: 7 # number of layers (including embeddings) from Whisper encoder
       initial_channel: 64 # initial channels of SLM discriminator head
+      hop_length: 300 # hop length of StyleTTS2 mel spectrograms for alignment
   
   # style diffusion model config
   diffusion:

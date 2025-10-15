@@ -3,7 +3,7 @@ from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
 from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
-from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WavLMLoss
+from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from Modules.slmadv import SLMAdversarialLoss
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
 from optimizers import build_optimizer
@@ -231,10 +231,18 @@ def main(config_path):
 
     gl = GeneratorLoss(model.mpd, model.msd).to(device)
     dl = DiscriminatorLoss(model.mpd, model.msd).to(device)
-    wl = WavLMLoss(model_params.slm.model, 
-                   model.wd, 
-                   sr, 
-                   model_params.slm.sr).to(device)
+    slm_hop_length = getattr(
+        model_params.slm,
+        "hop_length",
+        config["preprocess_params"]["spect_params"].get("hop_length", 300),
+    )
+    wl = WhisperLoss(
+        model_params.slm.model,
+        model.wd,
+        sr,
+        model_params.slm.sr,
+        hop_length=slm_hop_length,
+    ).to(device)
 
     gl = MyDataParallel(gl)
     dl = MyDataParallel(dl)
