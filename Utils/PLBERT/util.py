@@ -1,6 +1,7 @@
 import os
 import yaml
 import torch
+import torch.nn as nn
 from transformers import AlbertConfig, AlbertModel
 
 class CustomAlbert(AlbertModel):
@@ -38,5 +39,15 @@ def load_plbert(log_dir):
             new_state_dict[name] = v
     new_state_dict.pop("embeddings.position_ids", None)
     bert.load_state_dict(new_state_dict, strict=False)
-    
+
+    # The pooler weights are unused in downstream training loops but remain
+    # trainable parameters in the default ALBERT implementation. Under
+    # distributed training, parameters that never contribute to the loss cause
+    # DDP to error out unless ``find_unused_parameters`` is enabled. Replacing
+    # the pooler with an identity module removes those stale parameters and
+    # keeps the distributed graph consistent without the performance penalty of
+    # enabling unused-parameter detection.
+    if hasattr(bert, "pooler"):
+        bert.pooler = nn.Identity()
+
     return bert
