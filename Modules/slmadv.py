@@ -46,7 +46,10 @@ class SLMAdversarialLoss(torch.nn.Module):
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        bert_dur_sampler = bert_dur.clone() if bert_dur.requires_grad else bert_dur
+        if bert_dur.requires_grad:
+            bert_dur_sampler = bert_dur.detach().clone()
+        else:
+            bert_dur_sampler = bert_dur
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
         
         if use_ind and np.random.rand() < 0.5:

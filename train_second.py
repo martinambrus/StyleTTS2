@@ -431,7 +431,10 @@ def main(config_path):
             s_trg = torch.cat([gs, s_dur], dim=-1).detach() # ground truth for denoiser
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
-            bert_dur_sampler = bert_dur.clone() if bert_dur.requires_grad else bert_dur
+            if bert_dur.requires_grad:
+                bert_dur_sampler = bert_dur.detach().clone()
+            else:
+                bert_dur_sampler = bert_dur
             d_en = model.bert_encoder(bert_dur).transpose(-1, -2)
             
             # denoiser training
