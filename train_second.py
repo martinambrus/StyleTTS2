@@ -108,7 +108,11 @@ def main(config_path):
     os.makedirs(log_dir, exist_ok=True)
 
     find_unused = config.get('find_unused_parameters', False)
-    ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=find_unused)
+    broadcast_buffers = config.get('broadcast_buffers', False)
+    ddp_kwargs = DistributedDataParallelKwargs(
+        find_unused_parameters=find_unused,
+        broadcast_buffers=broadcast_buffers,
+    )
     accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
 
     seed = config.get('seed', 42)
