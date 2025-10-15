@@ -432,6 +432,8 @@ def main(config_path):
 
             bert_dur = model.bert(texts, attention_mask=(~text_mask).int())
             if bert_dur.requires_grad:
+                bert_dur = bert_dur.clone()
+            if bert_dur.requires_grad:
                 bert_dur_sampler = bert_dur.detach().clone()
             else:
                 bert_dur_sampler = bert_dur

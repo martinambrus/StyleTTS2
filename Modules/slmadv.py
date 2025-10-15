@@ -47,6 +47,8 @@ class SLMAdversarialLoss(torch.nn.Module):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
         if bert_dur.requires_grad:
+            bert_dur = bert_dur.clone()
+        if bert_dur.requires_grad:
             bert_dur_sampler = bert_dur.detach().clone()
         else:
             bert_dur_sampler = bert_dur
