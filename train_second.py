@@ -1119,6 +1119,7 @@ def main(config_path):
             accelerator.wait_for_everyone()
 
     _log_rank_debug(accelerator, "final checkpoint: waiting for all ranks before save")
+    accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         accelerator.print('Saving..')
         state = {
@@ -1131,7 +1132,6 @@ def main(config_path):
         save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
         _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
         accelerator.save(state, save_path)
-    accelerator.wait_for_everyone()
     _log_rank_debug(accelerator, "final checkpoint save section completed")
 
 if __name__=="__main__":
