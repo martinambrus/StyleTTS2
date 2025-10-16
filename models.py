@@ -1121,6 +1121,28 @@ def _match_state_dict(module, loaded_state, module_name=""):
     from collections import OrderedDict
 
     current_state = module.state_dict()
+
+    # Normalize checkpoint keys that may come from DistributedDataParallel wrappers.
+    def _maybe_strip_prefix(state_dict):
+        if not state_dict:
+            return state_dict
+
+        matches_with_prefix = sum(1 for k in state_dict if k.startswith("module."))
+        if matches_with_prefix == 0:
+            return state_dict
+
+        stripped = OrderedDict(
+            (k[len("module.") :], v) if k.startswith("module.") else (k, v)
+            for k, v in state_dict.items()
+        )
+
+        # Prefer the stripped mapping when it increases the amount of usable keys.
+        original_overlap = sum(1 for k in state_dict if k in current_state)
+        stripped_overlap = sum(1 for k in stripped if k in current_state)
+        return stripped if stripped_overlap >= original_overlap else state_dict
+
+    loaded_state = _maybe_strip_prefix(loaded_state)
+
     aligned_state = OrderedDict()
     missing_keys = []
     resized_keys = []
