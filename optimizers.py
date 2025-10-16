@@ -54,6 +54,13 @@ class MultiOptimizer:
                 if not torch.is_tensor(value):
                     continue
 
+                # Skip scalar tracking buffers such as the step counter. Those should
+                # remain zero-dimensional even when the parameter itself changes
+                # shape, otherwise optimizer updates expecting scalar tensors (e.g.
+                # AdamW bias correction) will crash when the state dict is reloaded.
+                if value.dim() == 0 or value.numel() == 1:
+                    continue
+
                 if tuple(value.shape) == param_shape:
                     continue
 
