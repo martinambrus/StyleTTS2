@@ -406,12 +406,22 @@ def main(config_path):
                 mask = length_to_mask(mel_input_length // (2 ** n_down)).to(device)
                 text_mask = length_to_mask(input_lengths).to(texts.device)
 
+                aligner_success = torch.tensor(1, device=device, dtype=torch.int)
                 try:
                     _, _, s2s_attn = _run_text_aligner(model.text_aligner, mels, mask, texts)
                     s2s_attn = s2s_attn.transpose(-1, -2)
                     s2s_attn = s2s_attn[..., 1:]
                     s2s_attn = s2s_attn.transpose(-1, -2)
                 except Exception:
+                    aligner_success.zero_()
+
+                if accelerator.num_processes > 1:
+                    aligner_success = accelerator.gather(aligner_success)
+                    all_aligner_success = bool(aligner_success.min().item())
+                else:
+                    all_aligner_success = bool(aligner_success.item())
+
+                if not all_aligner_success:
                     continue
 
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
@@ -422,7 +432,7 @@ def main(config_path):
                 asr = (t_en @ s2s_attn_mono)
 
                 d_gt = s2s_attn_mono.sum(axis=-1).detach()
-                
+
                 # compute reference styles
                 if multispeaker and epoch >= diff_epoch:
                     ref_ss = model.style_encoder(ref_mels.unsqueeze(1))
@@ -526,7 +536,17 @@ def main(config_path):
             gt = torch.stack(gt).detach()
             st = torch.stack(st).detach()
             
+            gt_valid = torch.tensor(1, device=device, dtype=torch.int)
             if gt.size(-1) < 80:
+                gt_valid.zero_()
+
+            if accelerator.num_processes > 1:
+                gt_valid = accelerator.gather(gt_valid)
+                all_gt_valid = bool(gt_valid.min().item())
+            else:
+                all_gt_valid = bool(gt_valid.item())
+
+            if not all_gt_valid:
                 continue
 
             s_dur = model.predictor_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
