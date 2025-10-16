@@ -4,6 +4,21 @@ import torch
 import torch.nn as nn
 from transformers import AlbertConfig, AlbertModel
 
+
+def _runtime_max_positions(config, override=None):
+    """Return the runtime position capacity for PL-BERT."""
+
+    if override is None:
+        override = 0
+
+    env_override = int(os.environ.get("PLBERT_MAX_POSITION", 0))
+    override = max(int(override or 0), env_override)
+
+    if override <= 0:
+        override = 1024
+
+    return max(int(config.max_position_embeddings), override)
+
 class CustomAlbert(AlbertModel):
     def __init__(self, config):
         super().__init__(config)
@@ -14,6 +29,13 @@ class CustomAlbert(AlbertModel):
             self.pooler_activation = nn.Identity()
 
     def forward(self, *args, **kwargs):
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and len(args) > 0:
+            input_ids = args[0]
+
+        if isinstance(input_ids, torch.Tensor):
+            kwargs.setdefault("token_type_ids", torch.zeros_like(input_ids))
+
         # Call the original forward method
         outputs = super().forward(*args, **kwargs)
 
@@ -25,7 +47,8 @@ def load_plbert(log_dir):
     config_path = os.path.join(log_dir, "config.yml")
     plbert_config = yaml.safe_load(open(config_path))
     
-    albert_base_configuration = AlbertConfig(**plbert_config['model_params'])
+    model_params = dict(plbert_config['model_params'])
+    albert_base_configuration = AlbertConfig(**model_params)
     bert = CustomAlbert(albert_base_configuration)
 
     ckpts = []
@@ -47,6 +70,22 @@ def load_plbert(log_dir):
             new_state_dict[name] = v
     new_state_dict.pop("embeddings.position_ids", None)
     bert.load_state_dict(new_state_dict, strict=False)
+
+    target_positions = _runtime_max_positions(
+        albert_base_configuration,
+        override=model_params.get("runtime_max_position_embeddings"),
+    )
+
+    if target_positions > bert.config.max_position_embeddings:
+        bert.resize_position_embeddings(target_positions)
+        embeddings = bert.embeddings
+        if hasattr(embeddings, "token_type_ids"):
+            token_type_ids = torch.zeros(
+                (1, target_positions),
+                dtype=embeddings.token_type_ids.dtype,
+                device=embeddings.token_type_ids.device,
+            )
+            embeddings.register_buffer("token_type_ids", token_type_ids, persistent=False)
 
     # The pooler weights are unused in downstream training loops but remain
     # trainable parameters in the default ALBERT implementation. Under
