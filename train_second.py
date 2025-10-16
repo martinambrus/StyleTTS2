@@ -651,6 +651,20 @@ def main(config_path):
                 except SkipSLMAdversarial:
                     slm_out = None
 
+                slm_available = torch.tensor(
+                    0 if slm_out is None else 1,
+                    device=device,
+                    dtype=torch.int,
+                )
+                if accelerator.num_processes > 1:
+                    slm_available = accelerator.gather(slm_available)
+                    has_slm = bool(slm_available.min().item())
+                else:
+                    has_slm = bool(slm_available.item())
+
+                if not has_slm:
+                    slm_out = None
+
                 if slm_out is None:
                     d_loss_slm = torch.zeros(1, device=device)
                     loss_gen_lm = torch.zeros(1, device=device)
