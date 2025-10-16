@@ -1061,26 +1061,29 @@ def main(config_path):
                         break
                             
         accelerator.wait_for_everyone()
-        if epoch % save_frequency == 0 and accelerator.is_main_process:
-            if (loss_test / max(iters_test, 1)) < best_loss:
-                best_loss = loss_test / max(iters_test, 1)
-            accelerator.print('Saving..')
-            state = {
-                'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
-                'optimizer': optimizer.state_dict(),
-                'iters': iters,
-                'val_loss': loss_test / max(iters_test, 1),
-                'epoch': epoch,
-            }
-            save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
-            torch.save(state, save_path)
+        if epoch % save_frequency == 0:
+            accelerator.wait_for_everyone()
+            if accelerator.is_main_process:
+                if (loss_test / max(iters_test, 1)) < best_loss:
+                    best_loss = loss_test / max(iters_test, 1)
+                accelerator.print('Saving..')
+                state = {
+                    'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
+                    'optimizer': optimizer.state_dict(),
+                    'iters': iters,
+                    'val_loss': loss_test / max(iters_test, 1),
+                    'epoch': epoch,
+                }
+                save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
+                torch.save(state, save_path)
 
-            # if estimate sigma, save the estimated simga
-            if model_params.diffusion.dist.estimate_sigma_data:
-                config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
+                # if estimate sigma, save the estimated simga
+                if model_params.diffusion.dist.estimate_sigma_data:
+                    config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
 
-                with open(os.path.join(log_dir, os.path.basename(config_path)), 'w') as outfile:
-                    yaml.dump(config, outfile, default_flow_style=True)
+                    with open(os.path.join(log_dir, os.path.basename(config_path)), 'w') as outfile:
+                        yaml.dump(config, outfile, default_flow_style=True)
+            accelerator.wait_for_everyone()
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -1094,6 +1097,7 @@ def main(config_path):
         }
         save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
         torch.save(state, save_path)
+    accelerator.wait_for_everyone()
         
 if __name__=="__main__":
     main()
