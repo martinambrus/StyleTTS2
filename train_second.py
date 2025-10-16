@@ -571,8 +571,10 @@ def main(config_path):
                     # ground truth from reconstruction
                     wav = y_rec_gt_pred # use reconstruction since decoder is fixed
 
-            F0_fake, N_fake = predictor_module.F0Ntrain(
-                _clone_if_grad(p_en), _clone_if_grad(s_dur)
+            F0_fake, N_fake = model.predictor(
+                _clone_if_grad(p_en),
+                _clone_if_grad(s_dur),
+                forward_mode="f0",
             )
 
             y_rec = model.decoder(
@@ -892,7 +894,11 @@ def main(config_path):
 
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
-                    F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s))
+                    F0_fake, N_fake = model.predictor(
+                        p_en,
+                        _clone_if_grad(s),
+                        forward_mode="f0",
+                    )
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
@@ -968,7 +974,11 @@ def main(config_path):
                         s_dur = model.predictor_encoder(gt.unsqueeze(1))
                         p_en = p[bib, :, :mel_length // 2].unsqueeze(0)
 
-                        F0_fake, N_fake = predictor_module.F0Ntrain(p_en, _clone_if_grad(s_dur))
+                        F0_fake, N_fake = model.predictor(
+                            p_en,
+                            _clone_if_grad(s_dur),
+                            forward_mode="f0",
+                        )
 
                         y_pred = model.decoder(
                             _clone_if_grad(en), F0_fake, N_fake, _clone_if_grad(s)
@@ -1028,8 +1038,10 @@ def main(config_path):
                         d.transpose(-1, -2)
                         @ pred_aln_trg.unsqueeze(0).to(texts.device)
                     )
-                    F0_pred, N_pred = predictor_module.F0Ntrain(
-                        _clone_if_grad(en), _clone_if_grad(s)
+                    F0_pred, N_pred = model.predictor(
+                        _clone_if_grad(en),
+                        _clone_if_grad(s),
+                        forward_mode="f0",
                     )
                     decoder_input = (
                         t_en[bib, :, :input_lengths[bib]]

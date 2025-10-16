@@ -589,36 +589,53 @@ class ProsodyPredictor(nn.Module):
         self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.N_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
 
-    def forward(self, texts, style, text_lengths, alignment, m):
-        d = self.text_encoder(texts, style, text_lengths, m)
+    def forward(
+        self,
+        texts,
+        style,
+        text_lengths=None,
+        alignment=None,
+        m=None,
+        *,
+        forward_mode="duration",
+    ):
+        if forward_mode == "duration":
+            if text_lengths is None or alignment is None or m is None:
+                raise ValueError("text_lengths, alignment, and m must be provided for duration mode")
 
-        
-        # predict duration
-        input_lengths = text_lengths.cpu().numpy()
-        x = nn.utils.rnn.pack_padded_sequence(
-            d, input_lengths, batch_first=True, enforce_sorted=False
-        )
+            d = self.text_encoder(texts, style, text_lengths, m)
 
-        m = m.to(text_lengths.device).unsqueeze(1)
+            # predict duration
+            input_lengths = text_lengths.cpu().numpy()
+            x = nn.utils.rnn.pack_padded_sequence(
+                d, input_lengths, batch_first=True, enforce_sorted=False
+            )
 
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(x)
-        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+            m = m.to(text_lengths.device).unsqueeze(1)
 
-        x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+            self.lstm.flatten_parameters()
+            x, _ = self.lstm(x)
+            x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
 
-        x_pad[:, : x.shape[1], :] = x
-        x = x_pad.to(x.device)
+            x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
 
-        duration = self.duration_proj(
-            nn.functional.dropout(x, 0.5, training=self.training)
-        )
+            x_pad[:, : x.shape[1], :] = x
+            x = x_pad.to(x.device)
 
-        en = d.transpose(-1, -2) @ alignment
+            duration = self.duration_proj(
+                nn.functional.dropout(x, 0.5, training=self.training)
+            )
 
-        return duration.squeeze(-1), en
+            en = d.transpose(-1, -2) @ alignment
 
-    def F0Ntrain(self, x, s):
+            return duration.squeeze(-1), en
+
+        if forward_mode == "f0":
+            return self._forward_f0n(texts, style)
+
+        raise ValueError(f"Unsupported forward_mode: {forward_mode}")
+
+    def _forward_f0n(self, x, s):
         x, _ = self.shared(x.transpose(-1, -2))
 
         F0 = x.transpose(-1, -2)
@@ -632,6 +649,9 @@ class ProsodyPredictor(nn.Module):
         N = self.N_proj(N)
 
         return F0.squeeze(1), N.squeeze(1)
+
+    def F0Ntrain(self, x, s):
+        return self._forward_f0n(x, s)
 
     def length_to_mask(self, lengths):
         mask = (

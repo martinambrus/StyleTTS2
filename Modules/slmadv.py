@@ -177,14 +177,15 @@ class SLMAdversarialLoss(torch.nn.Module):
         en = torch.stack(en)
         p_en = torch.stack(p_en)
         
+        predictor_ddp = self.model.predictor
         predictor_module = self._module('predictor')
         decoder_module = self._module('decoder')
 
         prosody_style = _clone_if_grad(sp[:, 128:])
         acoustic_style = _clone_if_grad(sp[:, :128])
 
-        F0_fake, N_fake = predictor_module.F0Ntrain(
-            _clone_if_grad(p_en), prosody_style
+        F0_fake, N_fake = predictor_ddp(
+            _clone_if_grad(p_en), prosody_style, forward_mode="f0"
         )
         y_pred = decoder_module(
             _clone_if_grad(en), F0_fake, N_fake, acoustic_style
