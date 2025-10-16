@@ -28,6 +28,42 @@ class CustomAlbert(AlbertModel):
         if hasattr(self, "pooler_activation"):
             self.pooler_activation = nn.Identity()
 
+    def resize_position_embeddings(self, target_positions):
+        """Resize the learned position embeddings to ``target_positions``."""
+
+        current_size, embed_dim = self.embeddings.position_embeddings.weight.shape
+
+        if target_positions == current_size:
+            return self.embeddings.position_embeddings
+
+        if target_positions <= 0:
+            raise ValueError("target_positions must be positive")
+
+        old_weight = self.embeddings.position_embeddings.weight.data
+        device = old_weight.device
+        dtype = old_weight.dtype
+
+        new_embeddings = nn.Embedding(target_positions, embed_dim)
+        new_weight = new_embeddings.weight.data
+
+        copy_size = min(current_size, target_positions)
+        new_weight[:copy_size].copy_(old_weight[:copy_size])
+
+        if target_positions > current_size:
+            pad_count = target_positions - current_size
+            new_weight[current_size:].copy_(old_weight[-1:].expand(pad_count, -1))
+
+        new_embeddings = new_embeddings.to(device=device, dtype=dtype)
+        self.embeddings.position_embeddings = new_embeddings
+
+        position_ids = torch.arange(target_positions, dtype=torch.long, device=device)
+        position_ids = position_ids.unsqueeze(0)
+        self.embeddings.register_buffer("position_ids", position_ids, persistent=False)
+
+        self.config.max_position_embeddings = target_positions
+
+        return self.embeddings.position_embeddings
+
     def forward(self, *args, **kwargs):
         input_ids = kwargs.get("input_ids")
         if input_ids is None and len(args) > 0:
