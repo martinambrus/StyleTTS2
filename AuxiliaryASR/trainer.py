@@ -1390,7 +1390,9 @@ class Trainer(object):
 
         """
         self.logger.info("Loading checkpoint from: %s" % checkpoint_path)
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
         target_model = self.accelerator.unwrap_model(self.model) if self.accelerator is not None else self.model
         self._load(state_dict["model"], target_model)
 

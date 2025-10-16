@@ -175,7 +175,9 @@ def load_asr_model_from_config(config: Dict, model_path: str, device: torch.devi
 
     model = build_model(model_params=model_params)
 
-    checkpoint = torch.load(str(checkpoint_path), map_location="cpu")
+    checkpoint = torch.load(
+        str(checkpoint_path), map_location="cpu", weights_only=False
+    )
     state_dict = checkpoint.get("model") if isinstance(checkpoint, dict) else checkpoint
     if not isinstance(state_dict, dict):
         raise RuntimeError(f"Checkpoint at '{model_path}' does not contain a valid state dict")

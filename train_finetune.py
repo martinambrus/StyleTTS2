@@ -481,7 +481,7 @@ def main(config_path):
 
                 wav = y_rec_gt
 
-            F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s_dur)
+            F0_fake, N_fake = model.predictor(p_en, s_dur, forward_mode="f0")
 
             y_rec = model.decoder(en, F0_fake, N_fake, s)
 
@@ -722,7 +722,7 @@ def main(config_path):
                     gt = torch.stack(gt).detach()
                     s = model.predictor_encoder(gt.unsqueeze(1))
 
-                    F0_fake, N_fake = model.predictor.F0Ntrain(p_en, s)
+                    F0_fake, N_fake = model.predictor(p_en, s, forward_mode="f0")
 
                     loss_dur = 0
                     for _s2s_pred, _text_input, _text_length in zip(d, (d_gt), input_lengths):
