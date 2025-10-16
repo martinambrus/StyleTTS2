@@ -205,7 +205,9 @@ class Trainer(object):
             load_ema_as_model (bool): Load EMA parameters instead of raw
                 weights when available.
         """
-        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        state_dict = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=False
+        )
         if load_ema_as_model and "ema_model" in state_dict:
             model_key = "ema_model"
         elif not load_ema_as_model and "model_non_ema" in state_dict:

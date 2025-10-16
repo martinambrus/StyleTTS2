@@ -746,7 +746,7 @@ def load_F0_models(path, config_path=None, use_ema=True):
     if not path:
         raise ValueError('A checkpoint path must be provided for the pitch extractor.')
 
-    checkpoint = torch.load(path, map_location='cpu')
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = None
         if use_ema:
@@ -892,7 +892,7 @@ def load_ASR_models(
         with open(ASR_MODEL_CONFIG, 'r', encoding='utf-8') as handle:
             config = yaml.safe_load(handle) or {}
 
-    checkpoint = torch.load(ASR_MODEL_PATH, map_location='cpu')
+    checkpoint = torch.load(ASR_MODEL_PATH, map_location='cpu', weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = checkpoint.get('model') or checkpoint.get('state_dict') or checkpoint
     else:
@@ -1194,7 +1194,7 @@ def _match_state_dict(module, loaded_state, module_name=""):
 
 
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=False)
     params = state["net"]
     for key in model:
         if key in params and key not in ignore_modules:
