@@ -152,7 +152,7 @@ def main(config_path):
 
     batch_size = config.get('batch_size', 10)
 
-    epochs = config.get('epochs_2nd', 200)
+    requested_epochs = config.get('epochs_2nd', 200)
     log_interval = config.get('log_interval', 10)
     save_frequency = config.get('save_freq', 2)
 
@@ -269,6 +269,8 @@ def main(config_path):
 
     load_pretrained = config.get('pretrained_model', '') != '' and config.get('second_stage_load_pretrained', False)
     
+    total_epochs = requested_epochs
+
     if not load_pretrained:
         if config.get('first_stage_path', '') != '':
             first_stage_path = os.path.join(log_dir, config.get('first_stage_path', 'first_stage.pth'))
@@ -285,7 +287,7 @@ def main(config_path):
             # these epochs should be counted from the start epoch
             diff_epoch += start_epoch
             joint_epoch += start_epoch
-            epochs += start_epoch
+            total_epochs = requested_epochs + start_epoch
 
             style_encoder_module = unwrapped_models['style_encoder']
             predictor_encoder_module = unwrapped_models['predictor_encoder']
@@ -318,7 +320,7 @@ def main(config_path):
     scheduler_params = {
         "max_lr": optimizer_params.lr,
         "pct_start": float(0),
-        "epochs": epochs,
+        "epochs": requested_epochs,
         "steps_per_epoch": steps_per_epoch,
     }
     scheduler_params_dict= {key: scheduler_params.copy() for key in model}
@@ -365,6 +367,11 @@ def main(config_path):
         start_epoch += 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
+    total_epochs = max(total_epochs, start_epoch + 1)
+    accelerator.print(
+        f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch})."
+    )
+
     text_aligner_module = unwrapped_models['text_aligner']
     n_down = getattr(text_aligner_module, 'n_down')
 
@@ -397,7 +404,7 @@ def main(config_path):
     )
 
 
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(start_epoch, total_epochs):
         _log_rank_debug(accelerator, f"epoch {epoch}: entering pre-epoch barrier")
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited pre-epoch barrier")
@@ -797,7 +804,7 @@ def main(config_path):
                     'Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f'
                     % (
                         epoch + 1,
-                        epochs,
+                        total_epochs,
                         i + 1,
                         len(train_list) // batch_size,
                         running_loss / log_interval,
@@ -1088,9 +1095,37 @@ def main(config_path):
                 accelerator,
                 f"epoch {epoch}: synchronizing before checkpoint save",
             )
-        if save_this_epoch and accelerator.is_main_process:
-            if (loss_test / max(iters_test, 1)) < best_loss:
-                best_loss = loss_test / max(iters_test, 1)
+            with accelerator.main_process_first():
+                if accelerator.is_main_process:
+                    if (loss_test / max(iters_test, 1)) < best_loss:
+                        best_loss = loss_test / max(iters_test, 1)
+                    accelerator.print('Saving..')
+                    state = {
+                        'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
+                        'optimizer': optimizer.state_dict(),
+                        'iters': iters,
+                        'val_loss': loss_test / max(iters_test, 1),
+                        'epoch': epoch,
+                    }
+                    save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
+                    _log_rank_debug(
+                        accelerator,
+                        f"epoch {epoch}: main process saving checkpoint to {save_path}",
+                    )
+                    accelerator.save(state, save_path)
+
+                    # if estimate sigma, save the estimated simga
+                    if model_params.diffusion.dist.estimate_sigma_data:
+                        config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
+
+                        with open(
+                            os.path.join(log_dir, os.path.basename(config_path)), 'w'
+                        ) as outfile:
+                            yaml.dump(config, outfile, default_flow_style=True)
+
+    _log_rank_debug(accelerator, "final checkpoint: waiting for main process save")
+    with accelerator.main_process_first():
+        if accelerator.is_main_process:
             accelerator.print('Saving..')
             state = {
                 'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
@@ -1099,40 +1134,11 @@ def main(config_path):
                 'val_loss': loss_test / max(iters_test, 1),
                 'epoch': epoch,
             }
-            save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
-            _log_rank_debug(
-                accelerator,
-                f"epoch {epoch}: main process saving checkpoint to {save_path}",
-            )
+            save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
+            _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
             accelerator.save(state, save_path)
-
-            # if estimate sigma, save the estimated simga
-            if model_params.diffusion.dist.estimate_sigma_data:
-                config['model_params']['diffusion']['dist']['sigma_data'] = float(np.mean(running_std))
-
-                with open(
-                    os.path.join(log_dir, os.path.basename(config_path)), 'w'
-                ) as outfile:
-                    yaml.dump(config, outfile, default_flow_style=True)
-
-        if save_this_epoch:
-            accelerator.wait_for_everyone()
-
-    _log_rank_debug(accelerator, "final checkpoint: waiting for all ranks before save")
-    accelerator.wait_for_everyone()
-    if accelerator.is_main_process:
-        accelerator.print('Saving..')
-        state = {
-            'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
-            'optimizer': optimizer.state_dict(),
-            'iters': iters,
-            'val_loss': loss_test / max(iters_test, 1),
-            'epoch': epoch,
-        }
-        save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
-        _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
-        accelerator.save(state, save_path)
     _log_rank_debug(accelerator, "final checkpoint save section completed")
+    accelerator.end_training()
 
 if __name__=="__main__":
     main()
