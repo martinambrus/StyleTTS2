@@ -245,6 +245,14 @@ def main(config_path):
         train_dataloader, val_dataloader
     )
 
+    def _disable_rng_sync(dataloader):
+        if hasattr(dataloader, "rng_types"):
+            dataloader.rng_types = []
+            dataloader.synchronized_generator = None
+
+    _disable_rng_sync(train_dataloader)
+    _disable_rng_sync(val_dataloader)
+
     diffusion_module = unwrapped_models['diffusion']
     diffusion_impl = getattr(diffusion_module, 'diffusion', diffusion_module)
             
