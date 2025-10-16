@@ -1110,21 +1110,78 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     return nets
 
 
+def _match_state_dict(module, loaded_state, module_name=""):
+    """Align a checkpoint state dict with the current module parameters.
+
+    This helper keeps existing parameters when the checkpoint is missing a key
+    and can expand positional embeddings when the current model expects a
+    larger table than the checkpoint provides.
+    """
+
+    from collections import OrderedDict
+
+    current_state = module.state_dict()
+    aligned_state = OrderedDict()
+    missing_keys = []
+    resized_keys = []
+
+    for name, current_tensor in current_state.items():
+        if name not in loaded_state:
+            missing_keys.append(name)
+            aligned_state[name] = current_tensor
+            continue
+
+        loaded_tensor = loaded_state[name]
+        if loaded_tensor.shape == current_tensor.shape:
+            aligned_state[name] = loaded_tensor
+            continue
+
+        if (
+            "position_embeddings.weight" in name
+            and loaded_tensor.shape[1:] == current_tensor.shape[1:]
+            and loaded_tensor.shape[0] <= current_tensor.shape[0]
+        ):
+            resized_tensor = current_tensor.clone()
+            length = loaded_tensor.shape[0]
+            resized_tensor[:length] = loaded_tensor.to(resized_tensor.dtype)
+            aligned_state[name] = resized_tensor
+            resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
+            continue
+
+        raise RuntimeError(
+            f"{module_name} parameter '{name}' has shape {current_tensor.shape} "
+            f"but checkpoint provides {loaded_tensor.shape}."
+        )
+
+    extra_keys = [name for name in loaded_state.keys() if name not in current_state]
+
+    if missing_keys:
+        print(
+            f"Warning: missing keys when loading {module_name}: {', '.join(missing_keys)}"
+        )
+    if extra_keys:
+        print(
+            f"Warning: unexpected keys in checkpoint for {module_name}: {', '.join(extra_keys)}"
+        )
+    for name, old_shape, new_shape in resized_keys:
+        print(
+            f"Info: resized {module_name} parameter '{name}' from {old_shape} to {new_shape}"
+        )
+
+    return aligned_state
+
+
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
     state = torch.load(path, map_location="cpu")
     params = state["net"]
     for key in model:
         if key in params and key not in ignore_modules:
+            module = getattr(model[key], "module", model[key])
             try:
-                model[key].load_state_dict(params[key], strict=True)
-            except:
-                from collections import OrderedDict
-                state_dict = params[key]
-                new_state_dict = OrderedDict()
-                print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict key length: {len(state_dict.keys())}')
-                for (k_m, v_m), (k_c, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
-                    new_state_dict[k_m] = v_c
-                model[key].load_state_dict(new_state_dict, strict=True)
+                module.load_state_dict(params[key], strict=True)
+            except RuntimeError:
+                aligned_state = _match_state_dict(module, params[key], module_name=key)
+                module.load_state_dict(aligned_state, strict=False)
             print("%s loaded" % key)
 
     if not load_only_params:
