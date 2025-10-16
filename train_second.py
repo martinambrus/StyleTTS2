@@ -1083,9 +1083,8 @@ def main(config_path):
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
         if epoch % save_frequency == 0:
-            _log_rank_debug(accelerator, f"epoch {epoch}: entering checkpoint barrier")
+            _log_rank_debug(accelerator, f"epoch {epoch}: synchronizing before checkpoint save")
             accelerator.wait_for_everyone()
-            _log_rank_debug(accelerator, f"epoch {epoch}: exited checkpoint barrier")
             if accelerator.is_main_process:
                 if (loss_test / max(iters_test, 1)) < best_loss:
                     best_loss = loss_test / max(iters_test, 1)
@@ -1107,9 +1106,6 @@ def main(config_path):
 
                     with open(os.path.join(log_dir, os.path.basename(config_path)), 'w') as outfile:
                         yaml.dump(config, outfile, default_flow_style=True)
-            _log_rank_debug(accelerator, f"epoch {epoch}: entering post-checkpoint barrier")
-            accelerator.wait_for_everyone()
-            _log_rank_debug(accelerator, f"epoch {epoch}: exited post-checkpoint barrier")
 
     _log_rank_debug(accelerator, "final checkpoint: waiting for all ranks before save")
     accelerator.wait_for_everyone()
@@ -1125,7 +1121,6 @@ def main(config_path):
         save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
         _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
         accelerator.save(state, save_path)
-    accelerator.wait_for_everyone()
     _log_rank_debug(accelerator, "final checkpoint save section completed")
 
 if __name__=="__main__":
