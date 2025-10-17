@@ -75,11 +75,32 @@ class SLMAdversarialLoss(torch.nn.Module):
         dist.broadcast(value, src=0)
         return int(value.item())
 
+    def _maybe_resize_sampler_embedding(self, embedding: torch.Tensor) -> None:
+        sampler = getattr(self, "sampler", None)
+        if sampler is None:
+            return
+
+        denoise_fn = getattr(sampler, "denoise_fn", None)
+        owner = getattr(denoise_fn, "__self__", None)
+        net = getattr(owner, "net", None)
+        if net is None:
+            return
+
+        net = getattr(net, "module", net)
+        fixed_embedding = getattr(net, "fixed_embedding", None)
+        if fixed_embedding is None:
+            return
+
+        length = embedding.size(1)
+        device = embedding.device
+        fixed_embedding._resize_if_needed(length, device)
+
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
         bert_dur = _clone_if_grad(bert_dur)
         bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
+        self._maybe_resize_sampler_embedding(bert_dur_sampler)
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
 
         device = ref_text.device
