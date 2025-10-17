@@ -686,9 +686,32 @@ class FixedEmbedding(nn.Module):
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
         if dist.is_available() and dist.is_initialized():
-            reduce_device = device
+            reduce_device = self.embedding.weight.device
+
+            if reduce_device.type == "meta":
+                reduce_device = device
+
+            backend = None
+            try:
+                backend = dist.get_backend()
+            except Exception:
+                pass
+
+            if (
+                backend == "nccl"
+                and reduce_device.type != "cuda"
+                and torch.cuda.is_available()
+            ):
+                reduce_device = torch.device(
+                    "cuda", torch.cuda.current_device()
+                )
+
+            if backend not in (None, "nccl") and reduce_device.type == "cuda":
+                reduce_device = torch.device("cpu")
+
             if reduce_device.type == "meta":
                 reduce_device = torch.device("cpu")
+
             target_length_tensor = torch.tensor(
                 [target_length], device=reduce_device, dtype=torch.long
             )
