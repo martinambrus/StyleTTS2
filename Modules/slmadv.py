@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import torch.distributed as dist
 
 
 def _clone_if_grad(tensor, *, force=False):
@@ -49,28 +50,30 @@ class SLMAdversarialLoss(torch.nn.Module):
             return module.module
         return module
 
-    def _maybe_resize_sampler_embedding(self, embedding: torch.Tensor) -> None:
-        """Ensure diffusion sampler positional embeddings grow uniformly across ranks."""
+    def _shared_bool(self, proba: float, device: torch.device) -> bool:
+        if not (dist.is_available() and dist.is_initialized()):
+            return np.random.rand() < proba
 
-        diffusion_fn = getattr(self.sampler, "denoise_fn", None)
-        if diffusion_fn is None or not hasattr(diffusion_fn, "__self__"):
-            return
+        if dist.get_rank() == 0:
+            value = torch.rand(1, device=device) < proba
+            flag = value.to(torch.bool)
+        else:
+            flag = torch.zeros(1, dtype=torch.bool, device=device)
 
-        diffusion = diffusion_fn.__self__
-        net = getattr(diffusion, "net", None)
-        fixed_embedding = getattr(net, "fixed_embedding", None) if net is not None else None
+        dist.broadcast(flag, src=0)
+        return bool(flag.item())
 
-        if fixed_embedding is None or not hasattr(fixed_embedding, "_resize_if_needed"):
-            return
+    def _shared_randint(self, low: int, high: int, device: torch.device) -> int:
+        if not (dist.is_available() and dist.is_initialized()):
+            return int(np.random.randint(low, high))
 
-        if embedding.dim() < 2:
-            return
+        if dist.get_rank() == 0:
+            value = torch.randint(low, high, (1,), device=device)
+        else:
+            value = torch.zeros(1, dtype=torch.long, device=device)
 
-        target_length = embedding.shape[1]
-        device = embedding.device
-
-        with torch.no_grad():
-            fixed_embedding._resize_if_needed(target_length, device)
+        dist.broadcast(value, src=0)
+        return int(value.item())
 
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
@@ -79,12 +82,16 @@ class SLMAdversarialLoss(torch.nn.Module):
         bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
 
-        self._maybe_resize_sampler_embedding(bert_dur_sampler)
+        device = ref_text.device
 
-        if use_ind and np.random.rand() < 0.5:
+        skip_sampler = False
+        if use_ind:
+            skip_sampler = self._shared_bool(0.5, device)
+
+        if skip_sampler:
             s_preds = s_trg
         else:
-            num_steps = np.random.randint(3, 5)
+            num_steps = self._shared_randint(3, 5, device)
             if ref_s is not None:
                 s_preds = self.sampler(
                     noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
@@ -95,11 +102,13 @@ class SLMAdversarialLoss(torch.nn.Module):
                     num_steps=num_steps,
                 ).squeeze(1)
             else:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
-                      embedding=bert_dur_sampler,
-                      embedding_scale=1,
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
+                s_preds = self.sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                    embedding=bert_dur_sampler,
+                    embedding_scale=1,
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
             
         s_dur = s_preds[:, 128:]
         s_preds[:, :128]
