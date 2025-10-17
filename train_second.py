@@ -411,6 +411,27 @@ def main(config_path):
     else:
         total_epochs = requested_epochs + start_epoch
 
+    if accelerator.num_processes > 1 and dist.is_available() and dist.is_initialized():
+        backend = dist.get_backend().lower()
+        sync_device = device if backend == "nccl" else torch.device("cpu")
+        schedule_tensor = torch.tensor(
+            [start_epoch, total_epochs],
+            device=sync_device,
+            dtype=torch.long,
+        )
+        dist.broadcast(schedule_tensor, src=0)
+        broadcast_start, broadcast_total = schedule_tensor.tolist()
+        if accelerator.is_main_process and (
+            broadcast_start != start_epoch or broadcast_total != total_epochs
+        ):
+            accelerator.print(
+                "Distributed resume schedule adjusted on broadcast: "
+                f"start_epoch {start_epoch} -> {broadcast_start}, "
+                f"total_epochs {total_epochs} -> {broadcast_total}."
+            )
+        start_epoch = int(broadcast_start)
+        total_epochs = int(broadcast_total)
+
     if accelerator.is_main_process and load_pretrained:
         if resume_note:
             accelerator.print(resume_note)
