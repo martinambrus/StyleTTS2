@@ -502,10 +502,10 @@ def main(config_path):
             d, p = model.predictor(
                 _clone_if_grad(d_en),
                 _clone_if_grad(s_dur),
-                                                    input_lengths,
-                                                    s2s_attn_mono,
-                                                    text_mask)
-            
+                input_lengths,
+                s2s_attn_mono,
+                text_mask)
+
             mel_len = min(int(mel_input_length.min().item() / 2 - 1), max_len // 2)
             mel_len_st = int(mel_input_length.min().item() / 2 - 1)
             en = []
@@ -547,6 +547,7 @@ def main(config_path):
                 all_gt_valid = bool(gt_valid.item())
 
             if not all_gt_valid:
+                print("Possible desync because of all_gt_valid is false (continue statement).")
                 continue
 
             s_dur = model.predictor_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
@@ -1013,53 +1014,53 @@ def main(config_path):
                               embedding_scale=1,
                               num_steps=5).squeeze(1)
 
-                    s = s_pred[:, 128:]
-                    ref = s_pred[:, :128]
+                        s = s_pred[:, 128:]
+                        ref = s_pred[:, :128]
 
-                    d = predictor_module.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
-                                                     s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
+                        d = predictor_module.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
+                                                         s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
 
-                    x, _ = predictor_module.lstm(d)
-                    duration = predictor_module.duration_proj(x)
+                        x, _ = predictor_module.lstm(d)
+                        duration = predictor_module.duration_proj(x)
 
-                    duration = torch.sigmoid(duration).sum(axis=-1)
-                    pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+                        duration = torch.sigmoid(duration).sum(axis=-1)
+                        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
-                    pred_dur[-1] += 5
+                        pred_dur[-1] += 5
 
-                    pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
-                    c_frame = 0
-                    for i in range(pred_aln_trg.size(0)):
-                        pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
-                        c_frame += int(pred_dur[i].data)
+                        pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
+                        c_frame = 0
+                        for i in range(pred_aln_trg.size(0)):
+                            pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
+                            c_frame += int(pred_dur[i].data)
 
-                    # encode prosody
-                    en = (
-                        d.transpose(-1, -2)
-                        @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                    )
-                    F0_pred, N_pred = model.predictor(
-                        _clone_if_grad(en),
-                        _clone_if_grad(s),
-                        forward_mode="f0",
-                    )
-                    decoder_input = (
-                        t_en[bib, :, :input_lengths[bib]]
-                        .unsqueeze(0)
-                        @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                    )
-                    out = model.decoder(
-                        _clone_if_grad(decoder_input),
-                        F0_pred,
-                        N_pred,
-                        _clone_if_grad(ref.squeeze().unsqueeze(0)),
-                    )
+                        # encode prosody
+                        en = (
+                            d.transpose(-1, -2)
+                            @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                        )
+                        F0_pred, N_pred = model.predictor(
+                            _clone_if_grad(en),
+                            _clone_if_grad(s),
+                            forward_mode="f0",
+                        )
+                        decoder_input = (
+                            t_en[bib, :, :input_lengths[bib]]
+                            .unsqueeze(0)
+                            @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                        )
+                        out = model.decoder(
+                            _clone_if_grad(decoder_input),
+                            F0_pred,
+                            N_pred,
+                            _clone_if_grad(ref.squeeze().unsqueeze(0)),
+                        )
 
-                    writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+                        writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
-                    if bib >= 5:
-                        break
-                            
+                        if bib >= 5:
+                            break
+
         accelerator.wait_for_everyone()
         if epoch % save_frequency == 0 and accelerator.is_main_process:
             if (loss_test / max(iters_test, 1)) < best_loss:
