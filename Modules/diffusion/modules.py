@@ -6,6 +6,7 @@ from .utils import default, exists, rand_bool
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.distributed as dist
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
 from einops_exts import rearrange_many
@@ -684,6 +685,16 @@ class FixedEmbedding(nn.Module):
         self.embedding = nn.Embedding(max_length, features)
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
+        if dist.is_available() and dist.is_initialized():
+            reduce_device = device
+            if reduce_device.type == "meta":
+                reduce_device = torch.device("cpu")
+            target_length_tensor = torch.tensor(
+                [target_length], device=reduce_device, dtype=torch.long
+            )
+            dist.all_reduce(target_length_tensor, op=dist.ReduceOp.MAX)
+            target_length = int(target_length_tensor.item())
+
         if target_length <= self.max_length:
             if self.embedding.weight.device != device:
                 self.embedding = self.embedding.to(device)
