@@ -2,40 +2,76 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
+
+def _clone_if_grad(tensor, *, force=False):
+    if isinstance(tensor, torch.Tensor) and (force or tensor.requires_grad):
+        return tensor.clone()
+    return tensor
+
+
+class SkipSLMAdversarial(Exception):
+    pass
+
 class SLMAdversarialLoss(torch.nn.Module):
 
-    def __init__(self, model, wl, sampler, min_len, max_len, batch_percentage=0.5, skip_update=10, sig=1.5):
+    def __init__(
+        self,
+        model,
+        wl,
+        sampler,
+        min_len,
+        max_len,
+        batch_percentage=0.5,
+        skip_update=10,
+        sig=1.5,
+        accelerator=None,
+        model_unwrapped=None,
+    ):
         super(SLMAdversarialLoss, self).__init__()
         self.model = model
         self.wl = wl
         self.sampler = sampler
-        
+
         self.min_len = min_len
         self.max_len = max_len
         self.batch_percentage = batch_percentage
-        
+
         self.sig = sig
         self.skip_update = skip_update
+        self.accelerator = accelerator
+        self.model_unwrapped = model_unwrapped or {}
+
+    def _module(self, key):
+        if isinstance(self.model_unwrapped, dict) and key in self.model_unwrapped:
+            return self.model_unwrapped[key]
+        module = self.model[key] if isinstance(self.model, dict) else getattr(self.model, key)
+        if hasattr(module, "module"):
+            return module.module
+        return module
         
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
-        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2) 
+        bert_dur = _clone_if_grad(bert_dur)
+        bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
+        d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
         
         if use_ind and np.random.rand() < 0.5:
             s_preds = s_trg
         else:
             num_steps = np.random.randint(3, 5)
             if ref_s is not None:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
-                      embedding_scale=1,
-                               features=ref_s, # reference from the same speaker as the embedding
-                         embedding_mask_proba=0.1,
-                         num_steps=num_steps).squeeze(1)
+                s_preds = self.sampler(
+                    noise=torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                    embedding=bert_dur_sampler,
+                    embedding_scale=1,
+                    features=_clone_if_grad(ref_s, force=True),
+                    embedding_mask_proba=0.1,
+                    num_steps=num_steps,
+                ).squeeze(1)
             else:
-                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device), 
-                      embedding=bert_dur,
+                s_preds = self.sampler(noise = torch.randn_like(s_trg).unsqueeze(1).to(ref_text.device),
+                      embedding=bert_dur_sampler,
                       embedding_scale=1,
                          embedding_mask_proba=0.1,
                          num_steps=num_steps).squeeze(1)
@@ -43,10 +79,13 @@ class SLMAdversarialLoss(torch.nn.Module):
         s_dur = s_preds[:, 128:]
         s_preds[:, :128]
         
-        d, _ = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device), 
-                                                text_mask)
+        d, _ = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            torch.randn(ref_lengths.shape[0], ref_lengths.max(), 2).to(ref_text.device),
+            text_mask,
+        )
         
         bib = 0
 
@@ -87,10 +126,13 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         asr_pred = t_en @ s2s_attn
 
-        _, p_pred = self.model.predictor(d_en, s_dur, 
-                                                ref_lengths, 
-                                                s2s_attn, 
-                                                text_mask)
+        _, p_pred = self.model.predictor(
+            _clone_if_grad(d_en),
+            _clone_if_grad(s_dur),
+            ref_lengths,
+            s2s_attn,
+            text_mask,
+        )
         
         mel_len = max(int(min(output_lengths) / 2 - 1), self.min_len // 2)
         mel_len = min(mel_len, self.max_len // 2)
@@ -121,16 +163,33 @@ class SLMAdversarialLoss(torch.nn.Module):
             if len(wav) >= self.batch_percentage * len(waves): # prevent OOM due to longer lengths
                 break
 
-        if len(sp) <= 1:
-            return None
+        batch_size_tensor = torch.tensor([len(sp)], device=ref_text.device)
+        if self.accelerator is not None:
+            global_min_batch = self.accelerator.gather(batch_size_tensor).min().item()
+        else:
+            global_min_batch = batch_size_tensor.min().item()
+
+        if global_min_batch <= 1:
+            raise SkipSLMAdversarial("skip slmadv")
             
         sp = torch.stack(sp)
         wav = torch.stack(wav).float()
         en = torch.stack(en)
         p_en = torch.stack(p_en)
         
-        F0_fake, N_fake = self.model.predictor.F0Ntrain(p_en, sp[:, 128:])
-        y_pred = self.model.decoder(en, F0_fake, N_fake, sp[:, :128])
+        predictor_ddp = self.model.predictor
+        predictor_module = self._module('predictor')
+        decoder_module = self._module('decoder')
+
+        prosody_style = _clone_if_grad(sp[:, 128:])
+        acoustic_style = _clone_if_grad(sp[:, :128])
+
+        F0_fake, N_fake = predictor_ddp(
+            _clone_if_grad(p_en), prosody_style, forward_mode="f0"
+        )
+        y_pred = decoder_module(
+            _clone_if_grad(en), F0_fake, N_fake, acoustic_style
+        )
         
         # discriminator loss
         if (iters + 1) % self.skip_update == 0:

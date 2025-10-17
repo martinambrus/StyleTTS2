@@ -683,10 +683,29 @@ class FixedEmbedding(nn.Module):
         self.max_length = max_length
         self.embedding = nn.Embedding(max_length, features)
 
+    def _resize_if_needed(self, target_length: int, device: torch.device):
+        if target_length <= self.max_length:
+            if self.embedding.weight.device != device:
+                self.embedding = self.embedding.to(device)
+            return
+
+        old_weight = self.embedding.weight.data
+        features = old_weight.shape[1]
+
+        new_embeddings = nn.Embedding(target_length, features, device=device, dtype=old_weight.dtype)
+        copy_length = min(self.max_length, target_length)
+        new_embeddings.weight.data[:copy_length].copy_(old_weight[:copy_length].to(device))
+
+        if target_length > copy_length:
+            pad = target_length - copy_length
+            new_embeddings.weight.data[copy_length:].copy_(old_weight[-1:].expand(pad, -1).to(device))
+
+        self.embedding = new_embeddings
+        self.max_length = target_length
+
     def forward(self, x: Tensor) -> Tensor:
         batch_size, length, device = *x.shape[0:2], x.device
-        assert_message = "Input sequence length must be <= max_length"
-        assert length <= self.max_length, assert_message
+        self._resize_if_needed(length, device)
         position = torch.arange(length, device=device)
         fixed_embedding = self.embedding(position)
         fixed_embedding = repeat(fixed_embedding, "n d -> b n d", b=batch_size)

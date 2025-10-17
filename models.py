@@ -589,36 +589,53 @@ class ProsodyPredictor(nn.Module):
         self.F0_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
         self.N_proj = nn.Conv1d(d_hid // 2, 1, 1, 1, 0)
 
-    def forward(self, texts, style, text_lengths, alignment, m):
-        d = self.text_encoder(texts, style, text_lengths, m)
+    def forward(
+        self,
+        texts,
+        style,
+        text_lengths=None,
+        alignment=None,
+        m=None,
+        *,
+        forward_mode="duration",
+    ):
+        if forward_mode == "duration":
+            if text_lengths is None or alignment is None or m is None:
+                raise ValueError("text_lengths, alignment, and m must be provided for duration mode")
 
-        
-        # predict duration
-        input_lengths = text_lengths.cpu().numpy()
-        x = nn.utils.rnn.pack_padded_sequence(
-            d, input_lengths, batch_first=True, enforce_sorted=False
-        )
+            d = self.text_encoder(texts, style, text_lengths, m)
 
-        m = m.to(text_lengths.device).unsqueeze(1)
+            # predict duration
+            input_lengths = text_lengths.cpu().numpy()
+            x = nn.utils.rnn.pack_padded_sequence(
+                d, input_lengths, batch_first=True, enforce_sorted=False
+            )
 
-        self.lstm.flatten_parameters()
-        x, _ = self.lstm(x)
-        x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
+            m = m.to(text_lengths.device).unsqueeze(1)
 
-        x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
+            self.lstm.flatten_parameters()
+            x, _ = self.lstm(x)
+            x, _ = nn.utils.rnn.pad_packed_sequence(x, batch_first=True)
 
-        x_pad[:, : x.shape[1], :] = x
-        x = x_pad.to(x.device)
+            x_pad = torch.zeros([x.shape[0], m.shape[-1], x.shape[-1]])
 
-        duration = self.duration_proj(
-            nn.functional.dropout(x, 0.5, training=self.training)
-        )
+            x_pad[:, : x.shape[1], :] = x
+            x = x_pad.to(x.device)
 
-        en = d.transpose(-1, -2) @ alignment
+            duration = self.duration_proj(
+                nn.functional.dropout(x, 0.5, training=self.training)
+            )
 
-        return duration.squeeze(-1), en
+            en = d.transpose(-1, -2) @ alignment
 
-    def F0Ntrain(self, x, s):
+            return duration.squeeze(-1), en
+
+        if forward_mode == "f0":
+            return self._forward_f0n(texts, style)
+
+        raise ValueError(f"Unsupported forward_mode: {forward_mode}")
+
+    def _forward_f0n(self, x, s):
         x, _ = self.shared(x.transpose(-1, -2))
 
         F0 = x.transpose(-1, -2)
@@ -632,6 +649,9 @@ class ProsodyPredictor(nn.Module):
         N = self.N_proj(N)
 
         return F0.squeeze(1), N.squeeze(1)
+
+    def F0Ntrain(self, x, s):
+        return self._forward_f0n(x, s)
 
     def length_to_mask(self, lengths):
         mask = (
@@ -726,7 +746,7 @@ def load_F0_models(path, config_path=None, use_ema=True):
     if not path:
         raise ValueError('A checkpoint path must be provided for the pitch extractor.')
 
-    checkpoint = torch.load(path, map_location='cpu')
+    checkpoint = torch.load(path, map_location='cpu', weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = None
         if use_ema:
@@ -872,7 +892,7 @@ def load_ASR_models(
         with open(ASR_MODEL_CONFIG, 'r', encoding='utf-8') as handle:
             config = yaml.safe_load(handle) or {}
 
-    checkpoint = torch.load(ASR_MODEL_PATH, map_location='cpu')
+    checkpoint = torch.load(ASR_MODEL_PATH, map_location='cpu', weights_only=False)
     if isinstance(checkpoint, dict):
         state_dict = checkpoint.get('model') or checkpoint.get('state_dict') or checkpoint
     else:
@@ -1090,21 +1110,100 @@ def build_model(args, text_aligner, pitch_extractor, bert):
     return nets
 
 
+def _match_state_dict(module, loaded_state, module_name=""):
+    """Align a checkpoint state dict with the current module parameters.
+
+    This helper keeps existing parameters when the checkpoint is missing a key
+    and can expand positional embeddings when the current model expects a
+    larger table than the checkpoint provides.
+    """
+
+    from collections import OrderedDict
+
+    current_state = module.state_dict()
+
+    # Normalize checkpoint keys that may come from DistributedDataParallel wrappers.
+    def _maybe_strip_prefix(state_dict):
+        if not state_dict:
+            return state_dict
+
+        matches_with_prefix = sum(1 for k in state_dict if k.startswith("module."))
+        if matches_with_prefix == 0:
+            return state_dict
+
+        stripped = OrderedDict(
+            (k[len("module.") :], v) if k.startswith("module.") else (k, v)
+            for k, v in state_dict.items()
+        )
+
+        # Prefer the stripped mapping when it increases the amount of usable keys.
+        original_overlap = sum(1 for k in state_dict if k in current_state)
+        stripped_overlap = sum(1 for k in stripped if k in current_state)
+        return stripped if stripped_overlap >= original_overlap else state_dict
+
+    loaded_state = _maybe_strip_prefix(loaded_state)
+
+    aligned_state = OrderedDict()
+    missing_keys = []
+    resized_keys = []
+
+    for name, current_tensor in current_state.items():
+        if name not in loaded_state:
+            missing_keys.append(name)
+            aligned_state[name] = current_tensor
+            continue
+
+        loaded_tensor = loaded_state[name]
+        if loaded_tensor.shape == current_tensor.shape:
+            aligned_state[name] = loaded_tensor
+            continue
+
+        if (
+            "position_embeddings.weight" in name
+            and loaded_tensor.shape[1:] == current_tensor.shape[1:]
+            and loaded_tensor.shape[0] <= current_tensor.shape[0]
+        ):
+            resized_tensor = current_tensor.clone()
+            length = loaded_tensor.shape[0]
+            resized_tensor[:length] = loaded_tensor.to(resized_tensor.dtype)
+            aligned_state[name] = resized_tensor
+            resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
+            continue
+
+        raise RuntimeError(
+            f"{module_name} parameter '{name}' has shape {current_tensor.shape} "
+            f"but checkpoint provides {loaded_tensor.shape}."
+        )
+
+    extra_keys = [name for name in loaded_state.keys() if name not in current_state]
+
+    if missing_keys:
+        print(
+            f"Warning: missing keys when loading {module_name}: {', '.join(missing_keys)}"
+        )
+    if extra_keys:
+        print(
+            f"Warning: unexpected keys in checkpoint for {module_name}: {', '.join(extra_keys)}"
+        )
+    for name, old_shape, new_shape in resized_keys:
+        print(
+            f"Info: resized {module_name} parameter '{name}' from {old_shape} to {new_shape}"
+        )
+
+    return aligned_state
+
+
 def load_checkpoint(model, optimizer, path, load_only_params=True, ignore_modules=[]):
-    state = torch.load(path, map_location="cpu")
+    state = torch.load(path, map_location="cpu", weights_only=False)
     params = state["net"]
     for key in model:
         if key in params and key not in ignore_modules:
+            module = getattr(model[key], "module", model[key])
             try:
-                model[key].load_state_dict(params[key], strict=True)
-            except:
-                from collections import OrderedDict
-                state_dict = params[key]
-                new_state_dict = OrderedDict()
-                print(f'{key} key length: {len(model[key].state_dict().keys())}, state_dict key length: {len(state_dict.keys())}')
-                for (k_m, v_m), (k_c, v_c) in zip(model[key].state_dict().items(), state_dict.items()):
-                    new_state_dict[k_m] = v_c
-                model[key].load_state_dict(new_state_dict, strict=True)
+                module.load_state_dict(params[key], strict=True)
+            except RuntimeError:
+                aligned_state = _match_state_dict(module, params[key], module_name=key)
+                module.load_state_dict(aligned_state, strict=False)
             print("%s loaded" % key)
 
     if not load_only_params:
