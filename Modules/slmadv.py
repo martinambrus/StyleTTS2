@@ -48,14 +48,39 @@ class SLMAdversarialLoss(torch.nn.Module):
         if hasattr(module, "module"):
             return module.module
         return module
-        
+
+    def _maybe_resize_sampler_embedding(self, embedding: torch.Tensor) -> None:
+        """Ensure diffusion sampler positional embeddings grow uniformly across ranks."""
+
+        diffusion_fn = getattr(self.sampler, "denoise_fn", None)
+        if diffusion_fn is None or not hasattr(diffusion_fn, "__self__"):
+            return
+
+        diffusion = diffusion_fn.__self__
+        net = getattr(diffusion, "net", None)
+        fixed_embedding = getattr(net, "fixed_embedding", None) if net is not None else None
+
+        if fixed_embedding is None or not hasattr(fixed_embedding, "_resize_if_needed"):
+            return
+
+        if embedding.dim() < 2:
+            return
+
+        target_length = embedding.shape[1]
+        device = embedding.device
+
+        with torch.no_grad():
+            fixed_embedding._resize_if_needed(target_length, device)
+
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
         bert_dur = _clone_if_grad(bert_dur)
         bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
         d_en = self.model.bert_encoder(bert_dur).transpose(-1, -2)
-        
+
+        self._maybe_resize_sampler_embedding(bert_dur_sampler)
+
         if use_ind and np.random.rand() < 0.5:
             s_preds = s_trg
         else:
