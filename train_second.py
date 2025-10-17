@@ -1186,20 +1186,6 @@ def main(config_path):
         epochs_since_start = epoch_index + 1
         save_this_epoch = (epochs_since_start % save_frequency == 0)
 
-        if (
-            accelerator.num_processes > 1
-            and dist.is_available()
-            and dist.is_initialized()
-        ):
-            backend = dist.get_backend().lower()
-            sync_device = device if backend == "nccl" else torch.device("cpu")
-            flag_tensor = torch.tensor(
-                1 if (save_this_epoch and accelerator.is_main_process) else 0,
-                device=sync_device,
-                dtype=torch.long,
-            )
-            dist.broadcast(flag_tensor, src=0)
-            save_this_epoch = bool(flag_tensor.item())
         _log_rank_debug(
             accelerator,
             f"epoch {epoch}: save check -> load_pretrained={load_pretrained}, "
