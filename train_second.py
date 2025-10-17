@@ -1185,22 +1185,21 @@ def main(config_path):
         epochs_since_start = epoch_index + 1
         save_this_epoch = (epochs_since_start % save_frequency == 0)
 
-        if accelerator.num_processes > 1 and dist.is_available() and dist.is_initialized():
-            backend = dist.get_backend().lower()
-            flag_device = device if backend == "nccl" else torch.device("cpu")
-            save_flag = torch.tensor(
+        if accelerator.num_processes > 1:
+            flag_tensor = torch.tensor(
                 [1 if save_this_epoch else 0],
-                device=flag_device,
+                device=device,
                 dtype=torch.int,
             )
-            dist.broadcast(save_flag, src=0)
-            broadcast_value = bool(save_flag.item())
-            if accelerator.is_main_process and broadcast_value != save_this_epoch:
-                accelerator.print(
-                    f"Save decision disagreement detected (local={save_this_epoch}, "
-                    f"broadcast={broadcast_value}); honoring broadcast value."
-                )
-            save_this_epoch = broadcast_value
+            gathered_flags = accelerator.gather(flag_tensor)
+            if accelerator.is_main_process:
+                unique_flags = torch.unique(gathered_flags)
+                if unique_flags.numel() > 1:
+                    accelerator.print(
+                        "Save decision disagreement detected across ranks: "
+                        f"{gathered_flags.tolist()}"
+                    )
+            save_this_epoch = bool(gathered_flags.max().item())
         _log_rank_debug(
             accelerator,
             f"epoch {epoch}: save check -> load_pretrained={load_pretrained}, "
