@@ -1,5 +1,5 @@
 from math import log, pi
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from .utils import default, exists, rand_bool
 
@@ -679,56 +679,121 @@ def TimePositionalEmbedding(dim: int, out_features: int) -> nn.Module:
     )
 
 class FixedEmbedding(nn.Module):
+    _resize_group: Optional[dist.ProcessGroup] = None
+    _resize_group_backend: Optional[str] = None
+
     def __init__(self, max_length: int, features: int):
         super().__init__()
         self.max_length = max_length
         self.embedding = nn.Embedding(max_length, features)
+        self._maybe_create_resize_group()
+
+    @classmethod
+    def _maybe_create_resize_group(cls) -> None:
+        if cls._resize_group is not None:
+            return
+
+        if not (dist.is_available() and dist.is_initialized()):
+            return
+
+        backend: Optional[str] = None
+        try:
+            backend = dist.get_backend()
+        except Exception:
+            backend = None
+
+        desired_backend = backend
+        if backend == "nccl":
+            if hasattr(dist, "is_gloo_available") and dist.is_gloo_available():
+                desired_backend = "gloo"
+            else:
+                desired_backend = backend
+
+        try:
+            cls._resize_group = dist.new_group(backend=desired_backend)
+            cls._resize_group_backend = desired_backend
+        except Exception:
+            cls._resize_group = dist.group.WORLD
+            cls._resize_group_backend = backend
+
+    def _get_reduce_device(
+        self, device: torch.device, backend: Optional[str]
+    ) -> torch.device:
+        reduce_device = self.embedding.weight.device
+
+        if reduce_device.type == "meta":
+            reduce_device = device
+
+        if (
+            backend == "nccl"
+            and reduce_device.type != "cuda"
+            and torch.cuda.is_available()
+        ):
+            reduce_device = torch.device("cuda", torch.cuda.current_device())
+
+        if backend not in (None, "nccl") and reduce_device.type == "cuda":
+            reduce_device = torch.device("cpu")
+
+        if reduce_device.type == "meta":
+            reduce_device = torch.device("cpu")
+
+        return reduce_device
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
+        process_group = None
+        backend: Optional[str] = None
+        group_world_size = 1
+
         if dist.is_available() and dist.is_initialized():
-            world_size = dist.get_world_size()
+            process_group = self._resize_group
+            backend = self._resize_group_backend
 
-            if world_size > 1:
-                reduce_device = self.embedding.weight.device
+            if process_group is None:
+                self._maybe_create_resize_group()
+                process_group = self._resize_group
+                backend = self._resize_group_backend
 
-                if reduce_device.type == "meta":
-                    reduce_device = device
-
-                backend = None
+            if process_group is not None:
                 try:
-                    backend = dist.get_backend()
+                    group_world_size = dist.get_world_size(process_group)
                 except Exception:
-                    pass
+                    group_world_size = dist.get_world_size()
+                    process_group = dist.group.WORLD
+                    backend = dist.get_backend()
 
-                if (
-                    backend == "nccl"
-                    and reduce_device.type != "cuda"
-                    and torch.cuda.is_available()
-                ):
-                    reduce_device = torch.device(
-                        "cuda", torch.cuda.current_device()
-                    )
+        if process_group is not None and group_world_size > 1:
+            backend = backend or dist.get_backend(process_group)
+            reduce_device = self._get_reduce_device(device, backend)
 
-                if backend not in (None, "nccl") and reduce_device.type == "cuda":
-                    reduce_device = torch.device("cpu")
-
-                if reduce_device.type == "meta":
-                    reduce_device = torch.device("cpu")
-
-                barrier_kwargs: Dict[str, Any] = {}
-                if backend == "nccl" and reduce_device.type == "cuda":
+            if backend != "nccl":
+                target_length_tensor = torch.tensor(
+                    [target_length], device=reduce_device, dtype=torch.long
+                )
+                dist.all_reduce(
+                    target_length_tensor,
+                    op=dist.ReduceOp.MAX,
+                    group=process_group,
+                )
+            else:
+                barrier_kwargs = {"group": process_group, "device_ids": None}
+                if reduce_device.type == "cuda":
                     device_index = reduce_device.index
                     if device_index is None:
                         device_index = torch.cuda.current_device()
                     barrier_kwargs["device_ids"] = [device_index]
 
-                dist.barrier(**barrier_kwargs)
+                dist.barrier(**{k: v for k, v in barrier_kwargs.items() if v is not None})
 
                 target_length_tensor = torch.tensor(
                     [target_length], device=reduce_device, dtype=torch.long
                 )
-                dist.all_reduce(target_length_tensor, op=dist.ReduceOp.MAX)
-                target_length = int(target_length_tensor.item())
+                dist.all_reduce(
+                    target_length_tensor,
+                    op=dist.ReduceOp.MAX,
+                    group=process_group,
+                )
+
+            target_length = int(target_length_tensor.item())
 
         if target_length <= self.max_length:
             if self.embedding.weight.device != device:
