@@ -356,6 +356,8 @@ def main(config_path):
             g['weight_decay'] = 1e-4
         
     # load models if there is a model
+    original_total_epochs = total_epochs
+
     if load_pretrained:
         model, optimizer, start_epoch, iters = load_checkpoint(
             model,
@@ -367,8 +369,16 @@ def main(config_path):
         start_epoch += 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
-    total_epochs = max(total_epochs, start_epoch + 1)
-    if accelerator.is_main_process and start_epoch > requested_epochs:
+        if requested_epochs <= 0:
+            total_epochs = start_epoch + 1
+        elif requested_epochs <= start_epoch:
+            total_epochs = start_epoch + requested_epochs
+        else:
+            total_epochs = max(total_epochs, requested_epochs)
+    else:
+        total_epochs = requested_epochs + start_epoch
+
+    if accelerator.is_main_process and total_epochs > original_total_epochs:
         accelerator.print(
             f"Requested {requested_epochs} epochs but resuming from epoch {start_epoch}; extending target to {total_epochs}."
         )
