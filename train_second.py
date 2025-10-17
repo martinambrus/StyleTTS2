@@ -1005,13 +1005,13 @@ def main(config_path):
                             s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
                               embedding=bert_dur[bib].unsqueeze(0),
                               embedding_scale=1,
-                                features=ref_s[bib].unsqueeze(0), # reference from the same speaker as the embedding
-                                 num_steps=5).squeeze(1)
-                    else:
-                        s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device), 
+                              features=ref_s[bib].unsqueeze(0), # reference from the same speaker as the embedding
+                              num_steps=5).squeeze(1)
+                        else:
+                            s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
                               embedding=bert_dur[bib].unsqueeze(0),
                               embedding_scale=1,
-                                 num_steps=5).squeeze(1)
+                              num_steps=5).squeeze(1)
 
                     s = s_pred[:, 128:]
                     ref = s_pred[:, :128]
