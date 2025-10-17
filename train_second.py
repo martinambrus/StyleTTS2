@@ -155,6 +155,14 @@ def main(config_path):
     requested_epochs = config.get('epochs_2nd', 200)
     log_interval = config.get('log_interval', 10)
     save_frequency = config.get('save_freq', 2)
+    try:
+        save_frequency = int(save_frequency)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid save_freq value {save_frequency!r}; expected an integer >= 1.")
+    if save_frequency <= 0:
+        accelerator.print(
+            f"Configured save_freq={save_frequency} is not positive; defaulting to 1 so checkpoints are saved each epoch.")
+        save_frequency = 1
 
     data_params = config.get('data_params') or {}
     sr = config['preprocess_params'].get('sr', 24000)
@@ -271,6 +279,8 @@ def main(config_path):
     resume_absolute = config.get('epochs_2nd_resume_absolute', False)
 
     total_epochs = requested_epochs
+    resume_epoch = None
+    resume_note = ""
 
     if not load_pretrained:
         if config.get('first_stage_path', '') != '':
@@ -360,33 +370,52 @@ def main(config_path):
     original_total_epochs = total_epochs
 
     if load_pretrained:
-        model, optimizer, start_epoch, iters = load_checkpoint(
+        model, optimizer, resume_epoch, iters = load_checkpoint(
             model,
             optimizer,
             config['pretrained_model'],
             load_only_params=config.get('load_only_params', True),
         )
         # advance start epoch or we'd re-train and rewrite the last epoch file
-        start_epoch += 1
+        start_epoch = (resume_epoch or 0) + 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
-        if requested_epochs <= 0:
-            total_epochs = start_epoch + 1
-        elif resume_absolute:
-            total_epochs = max(requested_epochs, start_epoch + 1)
+        completed_epochs = start_epoch
+        if resume_absolute:
+            # Treat the configured epochs as an absolute target.  If the run has
+            # already met or exceeded the requested total, extend by a single
+            # epoch so the user can capture a fresh checkpoint.
+            target_total = max(requested_epochs, completed_epochs + 1)
+            resume_note = (
+                f"Resuming with absolute target of {requested_epochs} epochs; running through epoch {target_total - 1}."
+            )
         else:
-            total_epochs = start_epoch + requested_epochs
+            if requested_epochs <= 0:
+                target_total = completed_epochs + 1
+                resume_note = (
+                    "Requested non-positive epochs after resume; scheduling one additional epoch to refresh checkpoints."
+                )
+            elif requested_epochs > completed_epochs:
+                target_total = requested_epochs
+                resume_note = (
+                    f"Resuming below requested total ({requested_epochs}); continuing until epoch {target_total - 1}."
+                )
+            else:
+                target_total = completed_epochs + requested_epochs
+                resume_note = (
+                    f"Requested epochs ({requested_epochs}) already completed; scheduling {requested_epochs} additional epochs."
+                )
+
+        total_epochs = max(target_total, completed_epochs + 1)
     else:
         total_epochs = requested_epochs + start_epoch
 
-    if accelerator.is_main_process and total_epochs > original_total_epochs:
-        if load_pretrained and not resume_absolute and requested_epochs > 0:
+    if accelerator.is_main_process and load_pretrained:
+        if resume_note:
+            accelerator.print(resume_note)
+        if total_epochs > original_total_epochs:
             accelerator.print(
-                f"Resuming from epoch {start_epoch} with {requested_epochs} additional epochs; extending target to {total_epochs}."
-            )
-        else:
-            accelerator.print(
-                f"Requested {requested_epochs} epochs but resuming from epoch {start_epoch}; extending target to {total_epochs}."
+                f"Extending second-stage schedule from {original_total_epochs} to {total_epochs} epochs after resume."
             )
     epochs_remaining = max(total_epochs - start_epoch, 0)
     accelerator.print(
@@ -1110,7 +1139,11 @@ def main(config_path):
         _log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
-        save_this_epoch = (epoch % save_frequency == 0)
+        if load_pretrained:
+            epochs_since_resume = epoch - start_epoch + 1
+            save_this_epoch = (epochs_since_resume % save_frequency == 0)
+        else:
+            save_this_epoch = (epoch % save_frequency == 0)
         if save_this_epoch:
             _log_rank_debug(
                 accelerator,
@@ -1161,7 +1194,6 @@ def main(config_path):
         accelerator.save(state, save_path)
     accelerator.wait_for_everyone()
     _log_rank_debug(accelerator, "final checkpoint save section completed")
-    accelerator.end_training()
 
 if __name__=="__main__":
     main()
