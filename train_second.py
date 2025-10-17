@@ -417,6 +417,13 @@ def main(config_path):
             accelerator.print(
                 f"Extending second-stage schedule from {original_total_epochs} to {total_epochs} epochs after resume."
             )
+        accelerator.print(
+            "Resume diagnostics: "
+            f"resume_epoch={resume_epoch}, start_epoch={start_epoch}, "
+            f"requested_epochs={requested_epochs}, total_epochs={total_epochs}, "
+            f"epochs_planned={max(total_epochs - start_epoch, 0)}, "
+            f"save_frequency={save_frequency}, resume_absolute={resume_absolute}"
+        )
     epochs_remaining = max(total_epochs - start_epoch, 0)
     accelerator.print(
         f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
@@ -454,7 +461,17 @@ def main(config_path):
     )
 
 
+    planned_epochs = max(total_epochs - start_epoch, 0)
+    if accelerator.is_main_process:
+        accelerator.print(
+            f"Epoch iterator configured for range({start_epoch}, {total_epochs}) -> {planned_epochs} epochs."
+        )
+
     for epoch in range(start_epoch, total_epochs):
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"Starting epoch {epoch} (index {epoch - start_epoch + 1} of {planned_epochs})."
+            )
         _log_rank_debug(accelerator, f"epoch {epoch}: entering pre-epoch barrier")
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited pre-epoch barrier")
@@ -1144,6 +1161,12 @@ def main(config_path):
             save_this_epoch = (epochs_since_resume % save_frequency == 0)
         else:
             save_this_epoch = (epoch % save_frequency == 0)
+        _log_rank_debug(
+            accelerator,
+            f"epoch {epoch}: save check -> load_pretrained={load_pretrained}, "
+            f"epochs_since_resume={epoch - start_epoch + 1 if load_pretrained else 'NA'}, "
+            f"save_frequency={save_frequency}, save_this_epoch={save_this_epoch}",
+        )
         if save_this_epoch:
             _log_rank_debug(
                 accelerator,
@@ -1177,8 +1200,15 @@ def main(config_path):
                     ) as outfile:
                         yaml.dump(config, outfile, default_flow_style=True)
             accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            accelerator.print(
+                f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
+            )
 
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
+    accelerator.print(
+        f"Exiting training loop at epoch {epoch}; total_epochs target was {total_epochs}."
+    )
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
         accelerator.print('Saving..')
@@ -1192,7 +1222,11 @@ def main(config_path):
         save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
         _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
         accelerator.save(state, save_path)
-    accelerator.wait_for_everyone()
+    try:
+        accelerator.wait_for_everyone()
+    except Exception as barrier_error:
+        accelerator.print(f"Final barrier raised {barrier_error!r}")
+        raise
     _log_rank_debug(accelerator, "final checkpoint save section completed")
 
 if __name__=="__main__":
