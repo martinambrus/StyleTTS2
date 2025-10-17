@@ -491,7 +491,9 @@ def main(config_path):
         )
 
     last_trained_epoch = start_epoch - 1
-    for epoch_index, epoch in enumerate(range(start_epoch, epoch_schedule_end)):
+    epoch_index = 0
+    epoch = start_epoch
+    while epoch < epoch_schedule_end:
         last_trained_epoch = epoch
         if accelerator.is_main_process:
             accelerator.print(
@@ -1184,21 +1186,20 @@ def main(config_path):
         epochs_since_start = epoch_index + 1
         save_this_epoch = (epochs_since_start % save_frequency == 0)
 
-        if accelerator.state.num_processes > 1:
+        if (
+            accelerator.num_processes > 1
+            and dist.is_available()
+            and dist.is_initialized()
+        ):
+            backend = dist.get_backend().lower()
+            sync_device = device if backend == "nccl" else torch.device("cpu")
             flag_tensor = torch.tensor(
-                [1 if save_this_epoch else 0],
-                device=device,
-                dtype=torch.int,
+                1 if (save_this_epoch and accelerator.is_main_process) else 0,
+                device=sync_device,
+                dtype=torch.long,
             )
-            gathered_flags = accelerator.gather(flag_tensor)
-            if accelerator.is_main_process:
-                unique_flags = torch.unique(gathered_flags)
-                if unique_flags.numel() > 1:
-                    accelerator.print(
-                        "Save decision disagreement detected across ranks: "
-                        f"{gathered_flags.tolist()}"
-                    )
-            save_this_epoch = bool(gathered_flags.max().item())
+            dist.broadcast(flag_tensor, src=0)
+            save_this_epoch = bool(flag_tensor.item())
         _log_rank_debug(
             accelerator,
             f"epoch {epoch}: save check -> load_pretrained={load_pretrained}, "
@@ -1242,6 +1243,9 @@ def main(config_path):
             accelerator.print(
                 f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
             )
+
+        epoch_index += 1
+        epoch += 1
 
     final_epoch = last_trained_epoch
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
