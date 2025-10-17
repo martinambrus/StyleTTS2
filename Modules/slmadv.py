@@ -50,7 +50,24 @@ class SLMAdversarialLoss(torch.nn.Module):
         return module
         
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
+        bert_module = self._module('bert')
+        bert_config = getattr(bert_module, "config", None)
+        max_positions = getattr(bert_config, "max_position_embeddings", None) if bert_config is not None else None
+        pad_token_id = getattr(bert_config, "pad_token_id", 0) if bert_config is not None else 0
+        if pad_token_id is None:
+            pad_token_id = 0
+
+        if max_positions is not None:
+            effective_max_positions = min(max_positions, ref_text.size(1))
+            if ref_text.size(1) > effective_max_positions:
+                ref_text = ref_text[:, :effective_max_positions].contiguous()
+            if ref_lengths.max().item() > effective_max_positions:
+                ref_lengths = ref_lengths.clamp(max=effective_max_positions)
+
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
+        if pad_token_id is not None:
+            ref_text = ref_text.masked_fill(text_mask, pad_token_id)
+
         bert_dur = self.model.bert(ref_text, attention_mask=(~text_mask).int())
         bert_dur = _clone_if_grad(bert_dur)
         bert_dur_sampler = _clone_if_grad(bert_dur.detach(), force=True)
