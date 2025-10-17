@@ -20,6 +20,7 @@ import yaml
 import time
 import numpy as np
 import torch
+import torch.distributed as dist
 import click
 import shutil
 import traceback
@@ -380,7 +381,7 @@ def main(config_path):
         start_epoch = (resume_epoch or 0) + 1
         accelerator.print('\nmodel data loaded, starting training epoch %05d\n' % start_epoch)
 
-        completed_epochs = start_epoch
+        completed_epochs = max(start_epoch - 1, 0)
         if resume_absolute:
             # Treat the configured epochs as an absolute target.  If the run has
             # already met or exceeded the requested total, extend by a single
@@ -1156,15 +1157,29 @@ def main(config_path):
         _log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
-        if load_pretrained:
-            epochs_since_resume = epoch - start_epoch + 1
-            save_this_epoch = (epochs_since_resume % save_frequency == 0)
-        else:
-            save_this_epoch = (epoch % save_frequency == 0)
+        epochs_since_start = max(epoch - start_epoch + 1, 1)
+        save_this_epoch = (epochs_since_start % save_frequency == 0)
+
+        if accelerator.num_processes > 1 and dist.is_available() and dist.is_initialized():
+            backend = dist.get_backend().lower()
+            flag_device = device if backend == "nccl" else torch.device("cpu")
+            save_flag = torch.tensor(
+                [1 if save_this_epoch else 0],
+                device=flag_device,
+                dtype=torch.int,
+            )
+            dist.broadcast(save_flag, src=0)
+            broadcast_value = bool(save_flag.item())
+            if accelerator.is_main_process and broadcast_value != save_this_epoch:
+                accelerator.print(
+                    f"Save decision disagreement detected (local={save_this_epoch}, "
+                    f"broadcast={broadcast_value}); honoring broadcast value."
+                )
+            save_this_epoch = broadcast_value
         _log_rank_debug(
             accelerator,
             f"epoch {epoch}: save check -> load_pretrained={load_pretrained}, "
-            f"epochs_since_resume={epoch - start_epoch + 1 if load_pretrained else 'NA'}, "
+            f"epochs_since_start={epochs_since_start}, "
             f"save_frequency={save_frequency}, save_this_epoch={save_this_epoch}",
         )
         if save_this_epoch:
