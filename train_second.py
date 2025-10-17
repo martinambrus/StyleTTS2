@@ -447,10 +447,9 @@ def main(config_path):
             f"save_frequency={save_frequency}, resume_absolute={resume_absolute}"
         )
     planned_epochs = max(total_epochs - start_epoch, 0)
-    target_total_epochs = start_epoch + planned_epochs
     epochs_remaining = planned_epochs
     accelerator.print(
-        f"Stage-two training target: {target_total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
+        f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
     )
 
     text_aligner_module = unwrapped_models['text_aligner']
@@ -487,12 +486,13 @@ def main(config_path):
 
     if accelerator.is_main_process:
         accelerator.print(
-            f"Epoch iterator configured for range({start_epoch}, {target_total_epochs}) -> {planned_epochs} epochs."
+            f"Epoch iterator configured for range({start_epoch}, {total_epochs}) -> {planned_epochs} epochs."
         )
 
+    epoch_range = range(start_epoch, total_epochs)
     last_trained_epoch = start_epoch - 1
-    for epoch_index in range(planned_epochs):
-        epoch = start_epoch + epoch_index
+    for epoch in epoch_range:
+        epoch_index = epoch - start_epoch
         last_trained_epoch = epoch
         if accelerator.is_main_process:
             accelerator.print(
@@ -897,7 +897,7 @@ def main(config_path):
                     'Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f'
                     % (
                         epoch + 1,
-                        target_total_epochs,
+                        total_epochs,
                         i + 1,
                         len(train_list) // batch_size,
                         running_loss / log_interval,
@@ -1242,13 +1242,13 @@ def main(config_path):
             accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             accelerator.print(
-                f"Completed epoch {epoch}; remaining epochs: {max(target_total_epochs - (epoch + 1), 0)}."
+                f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
             )
 
     final_epoch = last_trained_epoch
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
     accelerator.print(
-        f"Exiting training loop at epoch {final_epoch}; total_epochs target was {target_total_epochs}."
+        f"Exiting training loop at epoch {final_epoch}; total_epochs target was {total_epochs}."
     )
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
