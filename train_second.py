@@ -268,7 +268,8 @@ def main(config_path):
     iters = 0
 
     load_pretrained = config.get('pretrained_model', '') != '' and config.get('second_stage_load_pretrained', False)
-    
+    resume_absolute = config.get('epochs_2nd_resume_absolute', False)
+
     total_epochs = requested_epochs
 
     if not load_pretrained:
@@ -371,17 +372,22 @@ def main(config_path):
 
         if requested_epochs <= 0:
             total_epochs = start_epoch + 1
-        elif requested_epochs <= start_epoch:
-            total_epochs = start_epoch + requested_epochs
+        elif resume_absolute:
+            total_epochs = max(requested_epochs, start_epoch + 1)
         else:
-            total_epochs = max(total_epochs, requested_epochs)
+            total_epochs = start_epoch + requested_epochs
     else:
         total_epochs = requested_epochs + start_epoch
 
     if accelerator.is_main_process and total_epochs > original_total_epochs:
-        accelerator.print(
-            f"Requested {requested_epochs} epochs but resuming from epoch {start_epoch}; extending target to {total_epochs}."
-        )
+        if load_pretrained and not resume_absolute and requested_epochs > 0:
+            accelerator.print(
+                f"Resuming from epoch {start_epoch} with {requested_epochs} additional epochs; extending target to {total_epochs}."
+            )
+        else:
+            accelerator.print(
+                f"Requested {requested_epochs} epochs but resuming from epoch {start_epoch}; extending target to {total_epochs}."
+            )
     epochs_remaining = max(total_epochs - start_epoch, 0)
     accelerator.print(
         f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
