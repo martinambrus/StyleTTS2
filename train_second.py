@@ -105,16 +105,22 @@ def _log_rank_debug(accelerator, message):
     print(f"[rank{rank}] {message}", flush=True)
 
 
+def _cpu_clone(value):
+    """Recursively detach tensors and move them to CPU memory."""
+
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu()
+    if isinstance(value, dict):
+        return {key: _cpu_clone(subvalue) for key, subvalue in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_cpu_clone(item) for item in value)
+    return value
+
+
 def _to_cpu_state(state_dict):
     """Clone a module state dict onto the CPU without side effects."""
 
-    cpu_state = {}
-    for key, value in state_dict.items():
-        if isinstance(value, torch.Tensor):
-            cpu_state[key] = value.detach().cpu()
-        else:
-            cpu_state[key] = value
-    return cpu_state
+    return {key: _cpu_clone(value) for key, value in state_dict.items()}
 
 
 def _checkpoint_state(accelerator, model, optimizer, *, iters, val_loss, epoch, save_path, unwrapped_models=None):
@@ -132,7 +138,7 @@ def _checkpoint_state(accelerator, model, optimizer, *, iters, val_loss, epoch, 
 
     state = {
         'net': {},
-        'optimizer': optimizer.state_dict(),
+        'optimizer': _cpu_clone(optimizer.state_dict()),
         'iters': iters,
         'val_loss': val_loss,
         'epoch': epoch,
