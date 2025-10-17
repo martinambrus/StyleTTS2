@@ -84,6 +84,15 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         device = ref_text.device
 
+        if dist.is_available() and dist.is_initialized():
+            use_ind_tensor = torch.tensor(
+                [1 if use_ind else 0],
+                device=device,
+                dtype=torch.long,
+            )
+            dist.broadcast(use_ind_tensor, src=0)
+            use_ind = bool(use_ind_tensor.item())
+
         skip_sampler = False
         if use_ind:
             skip_sampler = self._shared_bool(0.5, device)
