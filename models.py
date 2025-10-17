@@ -1158,17 +1158,33 @@ def _match_state_dict(module, loaded_state, module_name=""):
             aligned_state[name] = loaded_tensor
             continue
 
-        if (
-            "position_embeddings.weight" in name
-            and loaded_tensor.shape[1:] == current_tensor.shape[1:]
-            and loaded_tensor.shape[0] <= current_tensor.shape[0]
-        ):
-            resized_tensor = current_tensor.clone()
-            length = loaded_tensor.shape[0]
-            resized_tensor[:length] = loaded_tensor.to(resized_tensor.dtype)
-            aligned_state[name] = resized_tensor
-            resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
-            continue
+        if loaded_tensor.shape[1:] == current_tensor.shape[1:]:
+            # Allow loading checkpoints with smaller (or larger) vocabulary/positional
+            # tables by copying the overlapping range and, when necessary,
+            # padding the remainder with the last available value.
+            if "position_embeddings.weight" in name and loaded_tensor.shape[0] <= current_tensor.shape[0]:
+                resized_tensor = current_tensor.clone()
+                length = loaded_tensor.shape[0]
+                resized_tensor[:length] = loaded_tensor.to(resized_tensor.dtype)
+                aligned_state[name] = resized_tensor
+                resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
+                continue
+
+            if loaded_tensor.ndim == current_tensor.ndim == 2:
+                resized_tensor = current_tensor.clone()
+                copy_length = min(current_tensor.shape[0], loaded_tensor.shape[0])
+                resized_tensor[:copy_length] = loaded_tensor[:copy_length].to(
+                    resized_tensor.dtype
+                )
+
+                if current_tensor.shape[0] > copy_length:
+                    pad = current_tensor.shape[0] - copy_length
+                    pad_value = loaded_tensor[-1:].to(resized_tensor.dtype)
+                    resized_tensor[copy_length:] = pad_value.expand(pad, -1)
+
+                aligned_state[name] = resized_tensor
+                resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
+                continue
 
         raise RuntimeError(
             f"{module_name} parameter '{name}' has shape {current_tensor.shape} "
