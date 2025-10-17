@@ -685,6 +685,11 @@ class FixedEmbedding(nn.Module):
         self.embedding = nn.Embedding(max_length, features)
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
+        if target_length <= self.max_length:
+            if self.embedding.weight.device != device:
+                self.embedding = self.embedding.to(device)
+            return
+
         if dist.is_available() and dist.is_initialized():
             backend: Optional[str]
             try:
@@ -721,10 +726,11 @@ class FixedEmbedding(nn.Module):
 
             target_length = int(target_length_tensor.item())
 
-        if target_length <= self.max_length:
-            if self.embedding.weight.device != device:
-                self.embedding = self.embedding.to(device)
-            return
+            if target_length <= self.max_length:
+                # Another rank requested a shorter resize, nothing to do here.
+                if self.embedding.weight.device != device:
+                    self.embedding = self.embedding.to(device)
+                return
 
         old_weight = self.embedding.weight.data
         features = old_weight.shape[1]
