@@ -104,6 +104,52 @@ def _log_rank_debug(accelerator, message):
         rank = 'NA'
     print(f"[rank{rank}] {message}", flush=True)
 
+
+def _to_cpu_state(state_dict):
+    """Clone a module state dict onto the CPU without side effects."""
+
+    cpu_state = {}
+    for key, value in state_dict.items():
+        if isinstance(value, torch.Tensor):
+            cpu_state[key] = value.detach().cpu()
+        else:
+            cpu_state[key] = value
+    return cpu_state
+
+
+def _checkpoint_state(accelerator, model, optimizer, *, iters, val_loss, epoch, save_path, unwrapped_models=None):
+    """Serialize the full training state from the main process.
+
+    The checkpoint routine mirrors :func:`torch.save` but avoids recreating
+    distributed wrappers and ensures tensors are moved to CPU memory before
+    writing.  Collecting very large models (e.g. Whisper-Large) on GPU while
+    saving the checkpoint can otherwise terminate the lead process which in
+    turn breaks the monitored barrier used by :class:`Accelerator`.
+    """
+
+    if not accelerator.is_main_process:
+        return
+
+    state = {
+        'net': {},
+        'optimizer': optimizer.state_dict(),
+        'iters': iters,
+        'val_loss': val_loss,
+        'epoch': epoch,
+    }
+
+    module_lookup = unwrapped_models or {}
+    for key, wrapped_module in model.items():
+        module = module_lookup.get(key)
+        if module is None:
+            try:
+                module = accelerator.unwrap_model(wrapped_module)
+            except Exception:
+                module = wrapped_module
+        state['net'][key] = _to_cpu_state(module.state_dict())
+
+    torch.save(state, save_path, _use_new_zipfile_serialization=False)
+
 logger = get_logger(__name__, log_level="DEBUG")
 
 
@@ -1092,28 +1138,22 @@ def main(config_path):
         #_log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
         save_this_epoch = (epoch % save_frequency == 0)
         if save_this_epoch:
-#             _log_rank_debug(
-#                 accelerator,
-#                 f"epoch {epoch}: synchronizing before checkpoint save",
-#             )
             with accelerator.main_process_first():
                 if accelerator.is_main_process:
                     if (loss_test / max(iters_test, 1)) < best_loss:
                         best_loss = loss_test / max(iters_test, 1)
                     accelerator.print('Saving..')
-                    state = {
-                        'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
-                        'optimizer': optimizer.state_dict(),
-                        'iters': iters,
-                        'val_loss': loss_test / max(iters_test, 1),
-                        'epoch': epoch,
-                    }
                     save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
-#                     _log_rank_debug(
-#                         accelerator,
-#                         f"epoch {epoch}: main process saving checkpoint to {save_path}",
-#                     )
-                    torch.save(state, save_path)
+                    _checkpoint_state(
+                        accelerator,
+                        model,
+                        optimizer,
+                        iters=iters,
+                        val_loss=loss_test / max(iters_test, 1),
+                        epoch=epoch,
+                        save_path=save_path,
+                        unwrapped_models=unwrapped_models,
+                    )
 
                     # if estimate sigma, save the estimated simga
                     if model_params.diffusion.dist.estimate_sigma_data:
@@ -1128,16 +1168,17 @@ def main(config_path):
     with accelerator.main_process_first():
         if accelerator.is_main_process:
             accelerator.print('Saving..')
-            state = {
-                'net':  {key: accelerator.unwrap_model(model[key]).state_dict() for key in model},
-                'optimizer': optimizer.state_dict(),
-                'iters': iters,
-                'val_loss': loss_test / max(iters_test, 1),
-                'epoch': epoch,
-            }
             save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
-            #_log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
-            torch.save(state, save_path)
+            _checkpoint_state(
+                accelerator,
+                model,
+                optimizer,
+                iters=iters,
+                val_loss=loss_test / max(iters_test, 1),
+                epoch=epoch,
+                save_path=save_path,
+                unwrapped_models=unwrapped_models,
+            )
     #_log_rank_debug(accelerator, "final checkpoint save section completed")
     accelerator.end_training()
 
