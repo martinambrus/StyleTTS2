@@ -1136,8 +1136,8 @@ def main(config_path):
 
                         writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
 
-                    if bib >= 5:
-                        break
+                        if bib >= 5:
+                            break
 
         #_log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
