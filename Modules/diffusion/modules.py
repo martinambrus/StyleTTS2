@@ -744,7 +744,12 @@ class FixedEmbedding(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         batch_size, length, device = *x.shape[0:2], x.device
-        self._resize_if_needed(length, device)
+
+        if self.embedding.weight.device != device:
+            self.embedding = self.embedding.to(device)
+
+        if length > self.max_length:
+            self._resize_if_needed(length, device)
         position = torch.arange(length, device=device)
         fixed_embedding = self.embedding(position)
         fixed_embedding = repeat(fixed_embedding, "n d -> b n d", b=batch_size)

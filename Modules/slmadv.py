@@ -93,7 +93,12 @@ class SLMAdversarialLoss(torch.nn.Module):
 
         length = embedding.size(1)
         device = embedding.device
-        fixed_embedding._resize_if_needed(length, device)
+
+        if fixed_embedding.embedding.weight.device != device:
+            fixed_embedding.embedding = fixed_embedding.embedding.to(device)
+
+        if length > fixed_embedding.max_length:
+            fixed_embedding._resize_if_needed(length, device)
 
     def forward(self, iters, y_rec_gt, y_rec_gt_pred, waves, mel_input_length, ref_text, ref_lengths, use_ind, s_trg, ref_s=None):
         text_mask = length_to_mask(ref_lengths).to(ref_text.device)
