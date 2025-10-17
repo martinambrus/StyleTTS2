@@ -1,5 +1,5 @@
 from math import log, pi
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from .utils import default, exists, rand_bool
 
@@ -686,37 +686,49 @@ class FixedEmbedding(nn.Module):
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
         if dist.is_available() and dist.is_initialized():
-            reduce_device = self.embedding.weight.device
+            world_size = dist.get_world_size()
 
-            if reduce_device.type == "meta":
-                reduce_device = device
+            if world_size > 1:
+                reduce_device = self.embedding.weight.device
 
-            backend = None
-            try:
-                backend = dist.get_backend()
-            except Exception:
-                pass
+                if reduce_device.type == "meta":
+                    reduce_device = device
 
-            if (
-                backend == "nccl"
-                and reduce_device.type != "cuda"
-                and torch.cuda.is_available()
-            ):
-                reduce_device = torch.device(
-                    "cuda", torch.cuda.current_device()
+                backend = None
+                try:
+                    backend = dist.get_backend()
+                except Exception:
+                    pass
+
+                if (
+                    backend == "nccl"
+                    and reduce_device.type != "cuda"
+                    and torch.cuda.is_available()
+                ):
+                    reduce_device = torch.device(
+                        "cuda", torch.cuda.current_device()
+                    )
+
+                if backend not in (None, "nccl") and reduce_device.type == "cuda":
+                    reduce_device = torch.device("cpu")
+
+                if reduce_device.type == "meta":
+                    reduce_device = torch.device("cpu")
+
+                barrier_kwargs: Dict[str, Any] = {}
+                if backend == "nccl" and reduce_device.type == "cuda":
+                    device_index = reduce_device.index
+                    if device_index is None:
+                        device_index = torch.cuda.current_device()
+                    barrier_kwargs["device_ids"] = [device_index]
+
+                dist.barrier(**barrier_kwargs)
+
+                target_length_tensor = torch.tensor(
+                    [target_length], device=reduce_device, dtype=torch.long
                 )
-
-            if backend not in (None, "nccl") and reduce_device.type == "cuda":
-                reduce_device = torch.device("cpu")
-
-            if reduce_device.type == "meta":
-                reduce_device = torch.device("cpu")
-
-            target_length_tensor = torch.tensor(
-                [target_length], device=reduce_device, dtype=torch.long
-            )
-            dist.all_reduce(target_length_tensor, op=dist.ReduceOp.MAX)
-            target_length = int(target_length_tensor.item())
+                dist.all_reduce(target_length_tensor, op=dist.ReduceOp.MAX)
+                target_length = int(target_length_tensor.item())
 
         if target_length <= self.max_length:
             if self.embedding.weight.device != device:
