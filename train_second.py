@@ -1113,7 +1113,7 @@ def main(config_path):
 #                         accelerator,
 #                         f"epoch {epoch}: main process saving checkpoint to {save_path}",
 #                     )
-                    accelerator.save(state, save_path)
+                    torch.save(state, save_path)
 
                     # if estimate sigma, save the estimated simga
                     if model_params.diffusion.dist.estimate_sigma_data:
@@ -1137,7 +1137,7 @@ def main(config_path):
             }
             save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
             #_log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
-            accelerator.save(state, save_path)
+            torch.save(state, save_path)
     #_log_rank_debug(accelerator, "final checkpoint save section completed")
     accelerator.end_training()
 
