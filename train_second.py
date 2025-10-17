@@ -541,6 +541,10 @@ def main(config_path):
                     all_aligner_success = bool(aligner_success.item())
 
                 if not all_aligner_success:
+                    _log_rank_debug(
+                        accelerator,
+                        "batch skipped due to unsynchronized text aligner failure",
+                    )
                     continue
 
                 mask_ST = mask_from_lens(s2s_attn, input_lengths, mel_input_length // (2 ** n_down))
@@ -666,6 +670,10 @@ def main(config_path):
                 all_gt_valid = bool(gt_valid.item())
 
             if not all_gt_valid:
+                _log_rank_debug(
+                    accelerator,
+                    "batch skipped because gathered ground-truth clip was too short",
+                )
                 continue
 
             s_dur = model.predictor_encoder(st.unsqueeze(1) if multispeaker else gt.unsqueeze(1))
@@ -943,6 +951,9 @@ def main(config_path):
             for batch_idx, batch in enumerate(val_dataloader):
                 optimizer.zero_grad()
 
+                eval_failed = torch.tensor(0, device=device, dtype=torch.int)
+                loss_mel_tensor = loss_dur_tensor = loss_f0_tensor = None
+                captured_exception = None
                 try:
                     waves = batch[0]
                     batch = [b.to(device) for b in batch[1:]]
@@ -1043,16 +1054,30 @@ def main(config_path):
 
                     loss_F0 = F.l1_loss(F0_real, F0_fake) / 10
 
-                    loss_test += accelerator.gather(loss_mel.detach()).mean().item()
-                    loss_align += accelerator.gather(loss_dur.detach()).mean().item()
-                    loss_f += accelerator.gather(loss_F0.detach()).mean().item()
-
-                    iters_test += 1
+                    loss_mel_tensor = loss_mel
+                    loss_dur_tensor = loss_dur
+                    loss_f0_tensor = loss_F0
                 except Exception as e:
-                    if accelerator.is_main_process:
-                        print(f"Encountered exception: {e}")
+                    eval_failed.fill_(1)
+                    captured_exception = e
+
+                if accelerator.num_processes > 1:
+                    eval_failed = accelerator.gather(eval_failed)
+                    skip_eval_batch = bool(eval_failed.max().item())
+                else:
+                    skip_eval_batch = bool(eval_failed.item())
+
+                if skip_eval_batch:
+                    if captured_exception is not None and accelerator.is_main_process:
+                        print(f"Encountered exception: {captured_exception}")
                         traceback.print_exc()
                     continue
+
+                loss_test += accelerator.gather(loss_mel_tensor.detach()).mean().item()
+                loss_align += accelerator.gather(loss_dur_tensor.detach()).mean().item()
+                loss_f += accelerator.gather(loss_f0_tensor.detach()).mean().item()
+
+                iters_test += 1
 
         if accelerator.is_main_process:
             accelerator.print('Epochs:', epoch + 1)
