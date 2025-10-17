@@ -425,9 +425,11 @@ def main(config_path):
             f"epochs_planned={max(total_epochs - start_epoch, 0)}, "
             f"save_frequency={save_frequency}, resume_absolute={resume_absolute}"
         )
-    epochs_remaining = max(total_epochs - start_epoch, 0)
+    planned_epochs = max(total_epochs - start_epoch, 0)
+    target_total_epochs = start_epoch + planned_epochs
+    epochs_remaining = planned_epochs
     accelerator.print(
-        f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
+        f"Stage-two training target: {target_total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
     )
 
     text_aligner_module = unwrapped_models['text_aligner']
@@ -462,16 +464,18 @@ def main(config_path):
     )
 
 
-    planned_epochs = max(total_epochs - start_epoch, 0)
     if accelerator.is_main_process:
         accelerator.print(
-            f"Epoch iterator configured for range({start_epoch}, {total_epochs}) -> {planned_epochs} epochs."
+            f"Epoch iterator configured for range({start_epoch}, {target_total_epochs}) -> {planned_epochs} epochs."
         )
 
-    for epoch in range(start_epoch, total_epochs):
+    last_trained_epoch = start_epoch - 1
+    for epoch_index in range(planned_epochs):
+        epoch = start_epoch + epoch_index
+        last_trained_epoch = epoch
         if accelerator.is_main_process:
             accelerator.print(
-                f"Starting epoch {epoch} (index {epoch - start_epoch + 1} of {planned_epochs})."
+                f"Starting epoch {epoch} (index {epoch_index + 1} of {planned_epochs})."
             )
         _log_rank_debug(accelerator, f"epoch {epoch}: entering pre-epoch barrier")
         accelerator.wait_for_everyone()
@@ -872,7 +876,7 @@ def main(config_path):
                     'Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f'
                     % (
                         epoch + 1,
-                        total_epochs,
+                        target_total_epochs,
                         i + 1,
                         len(train_list) // batch_size,
                         running_loss / log_interval,
@@ -1157,7 +1161,7 @@ def main(config_path):
         _log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
         _log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
-        epochs_since_start = max(epoch - start_epoch + 1, 1)
+        epochs_since_start = epoch_index + 1
         save_this_epoch = (epochs_since_start % save_frequency == 0)
 
         if accelerator.num_processes > 1 and dist.is_available() and dist.is_initialized():
@@ -1217,12 +1221,13 @@ def main(config_path):
             accelerator.wait_for_everyone()
         if accelerator.is_main_process:
             accelerator.print(
-                f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
+                f"Completed epoch {epoch}; remaining epochs: {max(target_total_epochs - (epoch + 1), 0)}."
             )
 
+    final_epoch = last_trained_epoch
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
     accelerator.print(
-        f"Exiting training loop at epoch {epoch}; total_epochs target was {total_epochs}."
+        f"Exiting training loop at epoch {final_epoch}; total_epochs target was {target_total_epochs}."
     )
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -1232,7 +1237,7 @@ def main(config_path):
             'optimizer': optimizer.state_dict(),
             'iters': iters,
             'val_loss': loss_test / max(iters_test, 1),
-            'epoch': epoch,
+            'epoch': final_epoch,
         }
         save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
         _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
