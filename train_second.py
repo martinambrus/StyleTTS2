@@ -489,9 +489,9 @@ def main(config_path):
             f"Epoch iterator configured for range({start_epoch}, {total_epochs}) -> {planned_epochs} epochs."
         )
 
-    epoch_range = range(start_epoch, total_epochs)
     last_trained_epoch = start_epoch - 1
-    for epoch in epoch_range:
+    epoch = start_epoch
+    while epoch < total_epochs:
         epoch_index = epoch - start_epoch
         last_trained_epoch = epoch
         if accelerator.is_main_process:
@@ -1244,6 +1244,8 @@ def main(config_path):
             accelerator.print(
                 f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
             )
+
+        epoch += 1
 
     final_epoch = last_trained_epoch
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
