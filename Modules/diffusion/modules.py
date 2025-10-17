@@ -685,10 +685,7 @@ class FixedEmbedding(nn.Module):
         self.embedding = nn.Embedding(max_length, features)
 
     def _resize_if_needed(self, target_length: int, device: torch.device):
-        if target_length <= self.max_length:
-            if self.embedding.weight.device != device:
-                self.embedding = self.embedding.to(device)
-            return
+        global_target_length = target_length
 
         if dist.is_available() and dist.is_initialized():
             backend: Optional[str]
@@ -724,27 +721,26 @@ class FixedEmbedding(nn.Module):
             if world_size > 1:
                 dist.all_reduce(target_length_tensor, op=dist.ReduceOp.MAX)
 
-            target_length = int(target_length_tensor.item())
+            global_target_length = int(target_length_tensor.item())
 
-            if target_length <= self.max_length:
-                # Another rank requested a shorter resize, nothing to do here.
-                if self.embedding.weight.device != device:
-                    self.embedding = self.embedding.to(device)
-                return
+        if global_target_length <= self.max_length:
+            if self.embedding.weight.device != device:
+                self.embedding = self.embedding.to(device)
+            return
 
         old_weight = self.embedding.weight.data
         features = old_weight.shape[1]
 
-        new_embeddings = nn.Embedding(target_length, features, device=device, dtype=old_weight.dtype)
-        copy_length = min(self.max_length, target_length)
+        new_embeddings = nn.Embedding(global_target_length, features, device=device, dtype=old_weight.dtype)
+        copy_length = min(self.max_length, global_target_length)
         new_embeddings.weight.data[:copy_length].copy_(old_weight[:copy_length].to(device))
 
-        if target_length > copy_length:
-            pad = target_length - copy_length
+        if global_target_length > copy_length:
+            pad = global_target_length - copy_length
             new_embeddings.weight.data[copy_length:].copy_(old_weight[-1:].expand(pad, -1).to(device))
 
         self.embedding = new_embeddings
-        self.max_length = target_length
+        self.max_length = global_target_length
 
     def forward(self, x: Tensor) -> Tensor:
         batch_size, length, device = *x.shape[0:2], x.device
