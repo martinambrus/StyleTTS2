@@ -447,6 +447,7 @@ def main(config_path):
             f"save_frequency={save_frequency}, resume_absolute={resume_absolute}"
         )
     planned_epochs = max(total_epochs - start_epoch, 0)
+    epoch_schedule_end = start_epoch + planned_epochs
     epochs_remaining = planned_epochs
     accelerator.print(
         f"Stage-two training target: {total_epochs} epochs (starting from epoch {start_epoch}, {epochs_remaining} remaining)."
@@ -486,13 +487,11 @@ def main(config_path):
 
     if accelerator.is_main_process:
         accelerator.print(
-            f"Epoch iterator configured for range({start_epoch}, {total_epochs}) -> {planned_epochs} epochs."
+            f"Epoch iterator configured for range({start_epoch}, {epoch_schedule_end}) -> {planned_epochs} epochs."
         )
 
     last_trained_epoch = start_epoch - 1
-    epoch = start_epoch
-    while epoch < total_epochs:
-        epoch_index = epoch - start_epoch
+    for epoch_index, epoch in enumerate(range(start_epoch, epoch_schedule_end)):
         last_trained_epoch = epoch
         if accelerator.is_main_process:
             accelerator.print(
@@ -1185,7 +1184,7 @@ def main(config_path):
         epochs_since_start = epoch_index + 1
         save_this_epoch = (epochs_since_start % save_frequency == 0)
 
-        if accelerator.num_processes > 1:
+        if accelerator.state.num_processes > 1:
             flag_tensor = torch.tensor(
                 [1 if save_this_epoch else 0],
                 device=device,
@@ -1243,8 +1242,6 @@ def main(config_path):
             accelerator.print(
                 f"Completed epoch {epoch}; remaining epochs: {max(total_epochs - (epoch + 1), 0)}."
             )
-
-        epoch += 1
 
     final_epoch = last_trained_epoch
     _log_rank_debug(accelerator, "final checkpoint: synchronizing before save")
