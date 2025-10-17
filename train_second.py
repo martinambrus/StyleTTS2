@@ -405,9 +405,9 @@ def main(config_path):
 
 
     for epoch in range(start_epoch, total_epochs):
-        _log_rank_debug(accelerator, f"epoch {epoch}: entering pre-epoch barrier")
+        #_log_rank_debug(accelerator, f"epoch {epoch}: entering pre-epoch barrier")
         accelerator.wait_for_everyone()
-        _log_rank_debug(accelerator, f"epoch {epoch}: exited pre-epoch barrier")
+        #_log_rank_debug(accelerator, f"epoch {epoch}: exited pre-epoch barrier")
         running_loss = 0
         start_time = time.time()
 
@@ -1087,15 +1087,15 @@ def main(config_path):
                     if bib >= 5:
                         break
 
-        _log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
+        #_log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
-        _log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
+        #_log_rank_debug(accelerator, f"epoch {epoch}: exited post-epoch barrier before save check")
         save_this_epoch = (epoch % save_frequency == 0)
         if save_this_epoch:
-            _log_rank_debug(
-                accelerator,
-                f"epoch {epoch}: synchronizing before checkpoint save",
-            )
+#             _log_rank_debug(
+#                 accelerator,
+#                 f"epoch {epoch}: synchronizing before checkpoint save",
+#             )
             with accelerator.main_process_first():
                 if accelerator.is_main_process:
                     if (loss_test / max(iters_test, 1)) < best_loss:
@@ -1109,10 +1109,10 @@ def main(config_path):
                         'epoch': epoch,
                     }
                     save_path = os.path.join(log_dir, 'epoch_2nd_%05d.pth' % epoch)
-                    _log_rank_debug(
-                        accelerator,
-                        f"epoch {epoch}: main process saving checkpoint to {save_path}",
-                    )
+#                     _log_rank_debug(
+#                         accelerator,
+#                         f"epoch {epoch}: main process saving checkpoint to {save_path}",
+#                     )
                     accelerator.save(state, save_path)
 
                     # if estimate sigma, save the estimated simga
@@ -1124,7 +1124,7 @@ def main(config_path):
                         ) as outfile:
                             yaml.dump(config, outfile, default_flow_style=True)
 
-    _log_rank_debug(accelerator, "final checkpoint: waiting for main process save")
+    #_log_rank_debug(accelerator, "final checkpoint: waiting for main process save")
     with accelerator.main_process_first():
         if accelerator.is_main_process:
             accelerator.print('Saving..')
@@ -1136,9 +1136,9 @@ def main(config_path):
                 'epoch': epoch,
             }
             save_path = os.path.join(log_dir, config.get('second_stage_path', 'second_stage.pth'))
-            _log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
+            #_log_rank_debug(accelerator, f"final checkpoint path on main process: {save_path}")
             accelerator.save(state, save_path)
-    _log_rank_debug(accelerator, "final checkpoint save section completed")
+    #_log_rank_debug(accelerator, "final checkpoint save section completed")
     accelerator.end_training()
 
 if __name__=="__main__":
