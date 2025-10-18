@@ -478,11 +478,11 @@ def main(config_path):
 
         # Wrap dataloader with tqdm for progress bar (only on main process)
         if accelerator.is_main_process:
-            pbar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f'Epoch {epoch+1}/{total_epochs}')
+            train_loop = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f'Epoch {epoch+1}/{total_epochs}')
         else:
-            pbar = enumerate(train_dataloader)
+            train_loop = enumerate(train_dataloader)
         
-        for i, batch in pbar:
+        for i, batch in train_loop:
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
@@ -899,6 +899,10 @@ def main(config_path):
                 running_loss = 0
 
                 accelerator.print('Time elasped:', time.time() - start_time)
+        
+        # Close progress bar if it exists
+        if accelerator.is_main_process and hasattr(train_loop, 'close'):
+            train_loop.close()
                 
         loss_test = 0.0
         loss_align = 0.0
