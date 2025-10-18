@@ -19,6 +19,7 @@ import torch
 import torch.nn.functional as F
 import time
 import logging
+from tqdm import tqdm
 
 from phoneme_dictionary import resolve_phoneme_dictionary_settings
 
@@ -252,7 +253,13 @@ def main(config_path):
 
         _ = [model[key].train() for key in model]
 
-        for i, batch in enumerate(train_dataloader):
+        # Wrap dataloader with tqdm for progress bar (only on main process)
+        if accelerator.is_main_process:
+            pbar = tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc=f'Epoch {epoch+1}/{epochs}')
+        else:
+            pbar = enumerate(train_dataloader)
+        
+        for i, batch in pbar:
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
