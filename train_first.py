@@ -106,6 +106,15 @@ def main(config_path):
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
+
+    # Disable TF32 paths and enforce deterministic cuDNN behaviour for GPUs such as H100/B200.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision('highest')
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
 
     mixed_precision_pref = config.get('mixed_precision', 'auto')

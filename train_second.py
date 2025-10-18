@@ -175,6 +175,14 @@ def main(config_path):
     log_dir = config['log_dir']
     os.makedirs(log_dir, exist_ok=True)
 
+    # Disable TF32 paths and enforce deterministic cuDNN behaviour for GPUs such as H100/B200.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision('highest')
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
     # Stage-two training swaps modules in and out of the graph (e.g., SLM adversarial
     # updates may skip batches entirely).  Keeping ``find_unused_parameters`` enabled
     # by default prevents DDP from stalling when a module's grads are legitimately
