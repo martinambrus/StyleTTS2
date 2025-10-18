@@ -13,6 +13,7 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
+from tqdm import tqdm
 
 import logging
 import os
@@ -475,7 +476,13 @@ def main(config_path):
         if epoch >= diff_epoch:
             start_ds = True
 
-        for i, batch in enumerate(train_dataloader):
+        # Wrap dataloader with tqdm only on main process
+        if accelerator.is_main_process:
+            pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{total_epochs}', total=len(train_dataloader))
+        else:
+            pbar = train_dataloader
+
+        for i, batch in enumerate(pbar):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, ref_texts, ref_lengths, mels, mel_input_length, ref_mels = batch
@@ -851,6 +858,10 @@ def main(config_path):
             loss_diff_value = accelerator.gather(loss_diff.detach()).mean().item()
                 
             iters = iters + 1
+
+            # Update progress bar with current loss
+            if accelerator.is_main_process and isinstance(pbar, tqdm):
+                pbar.set_postfix({'mel_loss': f'{running_loss / max(i+1, 1):.5f}'})
 
             if (i + 1) % log_interval == 0 and accelerator.is_main_process:
                 logger.info(

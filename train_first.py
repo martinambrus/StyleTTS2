@@ -9,6 +9,7 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
 from accelerate.logging import get_logger
+from tqdm import tqdm
 import os
 import shutil
 import click
@@ -252,7 +253,13 @@ def main(config_path):
 
         _ = [model[key].train() for key in model]
 
-        for i, batch in enumerate(train_dataloader):
+        # Wrap dataloader with tqdm only on main process
+        if accelerator.is_main_process:
+            pbar = tqdm(train_dataloader, desc=f'Epoch {epoch+1}/{epochs}', total=len(train_dataloader))
+        else:
+            pbar = train_dataloader
+
+        for i, batch in enumerate(pbar):
             waves = batch[0]
             batch = [b.to(device) for b in batch[1:]]
             texts, input_lengths, _, _, mels, mel_input_length, _ = batch
@@ -381,6 +388,10 @@ def main(config_path):
                 optimizer.step('pitch_extractor')
             
             iters = iters + 1
+            
+            # Update progress bar with current loss
+            if accelerator.is_main_process and isinstance(pbar, tqdm):
+                pbar.set_postfix({'mel_loss': f'{running_loss / max(i+1, 1):.5f}'})
             
             if (i+1)%log_interval == 0 and accelerator.is_main_process:
                 log_print ('Epoch [%d/%d], Step [%d/%d], Mel Loss: %.5f, Gen Loss: %.5f, Disc Loss: %.5f, Mono Loss: %.5f, S2S Loss: %.5f, SLM Loss: %.5f'
