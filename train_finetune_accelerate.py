@@ -652,18 +652,19 @@ def main(config_path):
                 logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f'
                     %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm, s_loss, loss_s2s, loss_mono))
                 
-                writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
-                writer.add_scalar('train/gen_loss', loss_gen_all, iters)
-                writer.add_scalar('train/d_loss', d_loss, iters)
-                writer.add_scalar('train/ce_loss', loss_ce, iters)
-                writer.add_scalar('train/dur_loss', loss_dur, iters)
-                writer.add_scalar('train/slm_loss', loss_lm, iters)
-                writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
-                writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
-                writer.add_scalar('train/sty_loss', loss_sty, iters)
-                writer.add_scalar('train/diff_loss', loss_diff, iters)
-                writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
-                writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
+                if writer is not None:
+                    writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
+                    writer.add_scalar('train/gen_loss', loss_gen_all, iters)
+                    writer.add_scalar('train/d_loss', d_loss, iters)
+                    writer.add_scalar('train/ce_loss', loss_ce, iters)
+                    writer.add_scalar('train/dur_loss', loss_dur, iters)
+                    writer.add_scalar('train/slm_loss', loss_lm, iters)
+                    writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
+                    writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
+                    writer.add_scalar('train/sty_loss', loss_sty, iters)
+                    writer.add_scalar('train/diff_loss', loss_diff, iters)
+                    writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
+                    writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
                 
                 running_loss = 0
                 
@@ -783,9 +784,10 @@ def main(config_path):
         print('Epochs:', epoch + 1)
         logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (loss_test / iters_test, loss_align / iters_test, loss_f / iters_test) + '\n\n\n')
         print('\n\n\n')
-        writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
+        if writer is not None:
+            writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
+            writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)
+            writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
         
         
         if (epoch + 1) % save_freq == 0 :
