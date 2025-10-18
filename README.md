@@ -61,7 +61,8 @@ In [config.yml](https://github.com/yl4579/StyleTTS2/blob/main/Configs/config.yml
 - `min_length`: Minimum length of OOD texts for training. This is to make sure the synthesized speech has a minimum length.
 - `max_len`: Maximum length of audio for training. The unit is frame. Since the default hop size is 300, one frame is approximately `300 / 24000` (0.0125) second. Lowering this if you encounter the out-of-memory issue. 
 - `multispeaker`: Set to true if you want to train a multispeaker model. This is needed because the architecture of the denoiser is different for single and multispeaker models.
-- `batch_percentage`: This is to make sure during SLM adversarial training there are no out-of-memory (OOM) issues. If you encounter OOM problem, please set a lower number for this. 
+- `batch_percentage`: This is to make sure during SLM adversarial training there are no out-of-memory (OOM) issues. If you encounter OOM problem, please set a lower number for this.
+- `mixed_precision`: Controls the accelerator precision mode. Leave this as `auto` to enable bfloat16 kernels on data-center GPUs such as A100, H100/H200, and B100/B200 while falling back to fp16 on older cards. Set it to `no`, `fp16`, or `bf16` to override the automatic selection.
 
 ### Pre-trained modules
 In [Utils](https://github.com/yl4579/StyleTTS2/tree/main/Utils) folder, there are three pre-trained models: 
@@ -86,6 +87,8 @@ If you are using a **single GPU** (because the script doesn't work with DDP) and
 accelerate launch --mixed_precision=fp16 --num_processes=1 train_finetune_accelerate.py --config_path ./Configs/config_ft.yml
 ```
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/yl4579/StyleTTS2/blob/main/Colab/StyleTTS2_Finetune_Demo.ipynb)
+
+The training scripts now default to an automatic mixed-precision mode that selects bfloat16 on Hopper- and Blackwell-class GPUs (H100/H200, B100/B200) while retaining fp16 on earlier hardware, ensuring full compatibility with newer accelerators without manual tuning.
 
 ### Common Issues
 [@Kreevoz](https://github.com/Kreevoz) has made detailed notes on common issues in finetuning, with suggestions in maximizing audio quality: [#81](https://github.com/yl4579/StyleTTS2/discussions/81). Some of these also apply to training from scratch. [@IIEleven11](https://github.com/IIEleven11) has also made a guideline for fine-tuning: [#128](https://github.com/yl4579/StyleTTS2/discussions/128).

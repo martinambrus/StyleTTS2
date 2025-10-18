@@ -15,7 +15,15 @@ from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
+from utils import (
+    describe_cuda_device,
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    recursive_munch,
+    select_accelerate_mixed_precision,
+)
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from Modules.slmadv import SLMAdversarialLoss
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
@@ -86,7 +94,7 @@ def _run_text_aligner(aligner, mels, mask, texts):
         )
     return outputs
 
-accelerator = Accelerator()
+accelerator = None
 
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
@@ -107,18 +115,37 @@ logger.addHandler(handler)
 @click.option('-p', '--config_path', default='Configs/config_ft.yml', type=str)
 def main(config_path):
     config = yaml.safe_load(open(config_path))
-    
+
     log_dir = config['log_dir']
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
-    writer = SummaryWriter(log_dir + "/tensorboard")
 
-    # write logs
-    file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
-    logger.addHandler(file_handler)
+    global accelerator
+    mixed_precision_pref = config.get('mixed_precision', 'auto')
+    mixed_precision = select_accelerate_mixed_precision(mixed_precision_pref)
+
+    accelerator_kwargs = dict(project_dir=log_dir)
+    if mixed_precision != 'no':
+        accelerator_kwargs['mixed_precision'] = mixed_precision
+
+    accelerator = Accelerator(**accelerator_kwargs)
+
+    if accelerator.is_main_process:
+        logger.info(
+            "Using %s mixed precision on %s",
+            mixed_precision,
+            describe_cuda_device(),
+        )
+        shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
+        writer = SummaryWriter(log_dir + "/tensorboard")
+
+        # write logs
+        file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
+        logger.addHandler(file_handler)
+    else:
+        writer = None
 
     
     batch_size = config.get('batch_size', 10)

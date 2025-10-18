@@ -2,7 +2,17 @@ from munch import Munch
 from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
-from utils import get_data_path_list, get_image, length_to_mask, log_norm, log_print, maximum_path, recursive_munch
+from utils import (
+    describe_cuda_device,
+    get_data_path_list,
+    get_image,
+    length_to_mask,
+    log_norm,
+    log_print,
+    maximum_path,
+    recursive_munch,
+    select_accelerate_mixed_precision,
+)
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from optimizers import build_optimizer
 from accelerate import Accelerator
@@ -97,9 +107,28 @@ def main(config_path):
         os.makedirs(log_dir, exist_ok=True)
     shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
     ddp_kwargs = DistributedDataParallelKwargs(find_unused_parameters=True)
-    accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])    
+
+    mixed_precision_pref = config.get('mixed_precision', 'auto')
+    mixed_precision = select_accelerate_mixed_precision(mixed_precision_pref)
+
+    accelerator_kwargs = dict(
+        project_dir=log_dir,
+        split_batches=True,
+        kwargs_handlers=[ddp_kwargs],
+    )
+    if mixed_precision != 'no':
+        accelerator_kwargs['mixed_precision'] = mixed_precision
+
+    accelerator = Accelerator(**accelerator_kwargs)
     if accelerator.is_main_process:
+        logger.info(
+            "Using %s mixed precision on %s",
+            mixed_precision,
+            describe_cuda_device(),
+        )
         writer = SummaryWriter(log_dir + "/tensorboard")
+    else:
+        writer = None
 
     # write logs
     file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
