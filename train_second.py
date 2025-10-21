@@ -2,7 +2,15 @@ from torch.utils.tensorboard import SummaryWriter
 from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
+from utils import (
+    describe_cuda_device,
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    recursive_munch,
+    select_accelerate_mixed_precision,
+)
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from Modules.slmadv import SLMAdversarialLoss, SkipSLMAdversarial
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
@@ -167,6 +175,14 @@ def main(config_path):
     log_dir = config['log_dir']
     os.makedirs(log_dir, exist_ok=True)
 
+    # Disable TF32 paths and enforce deterministic cuDNN behaviour for GPUs such as H100/B200.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision('highest')
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
     # Stage-two training swaps modules in and out of the graph (e.g., SLM adversarial
     # updates may skip batches entirely).  Keeping ``find_unused_parameters`` enabled
     # by default prevents DDP from stalling when a module's grads are legitimately
@@ -178,7 +194,25 @@ def main(config_path):
         find_unused_parameters=find_unused,
         broadcast_buffers=broadcast_buffers,
     )
-    accelerator = Accelerator(project_dir=log_dir, split_batches=True, kwargs_handlers=[ddp_kwargs])
+    mixed_precision_pref = config.get('mixed_precision', 'auto')
+    mixed_precision = select_accelerate_mixed_precision(mixed_precision_pref)
+
+    accelerator_kwargs = dict(
+        project_dir=log_dir,
+        split_batches=True,
+        kwargs_handlers=[ddp_kwargs],
+    )
+    if mixed_precision != 'no':
+        accelerator_kwargs['mixed_precision'] = mixed_precision
+
+    accelerator = Accelerator(**accelerator_kwargs)
+
+    if accelerator.is_main_process:
+        logger.info(
+            "Using %s mixed precision on %s",
+            mixed_precision,
+            describe_cuda_device(),
+        )
 
     seed = config.get('seed', 42)
     set_seed(seed, device_specific=False)

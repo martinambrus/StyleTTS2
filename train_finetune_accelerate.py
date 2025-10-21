@@ -15,7 +15,15 @@ from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
-from utils import get_data_path_list, length_to_mask, log_norm, maximum_path, recursive_munch
+from utils import (
+    describe_cuda_device,
+    get_data_path_list,
+    length_to_mask,
+    log_norm,
+    maximum_path,
+    recursive_munch,
+    select_accelerate_mixed_precision,
+)
 from losses import DiscriminatorLoss, GeneratorLoss, MultiResolutionSTFTLoss, WhisperLoss
 from Modules.slmadv import SLMAdversarialLoss
 from Modules.diffusion.sampler import DiffusionSampler, ADPM2Sampler, KarrasSchedule
@@ -86,7 +94,7 @@ def _run_text_aligner(aligner, mels, mask, texts):
         )
     return outputs
 
-accelerator = Accelerator()
+accelerator = None
 
 # simple fix for dataparallel that allows access to class attributes
 class MyDataParallel(torch.nn.DataParallel):
@@ -107,18 +115,45 @@ logger.addHandler(handler)
 @click.option('-p', '--config_path', default='Configs/config_ft.yml', type=str)
 def main(config_path):
     config = yaml.safe_load(open(config_path))
-    
+
     log_dir = config['log_dir']
     if not os.path.exists(log_dir):
         os.makedirs(log_dir, exist_ok=True)
-    shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
-    writer = SummaryWriter(log_dir + "/tensorboard")
 
-    # write logs
-    file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
-    logger.addHandler(file_handler)
+    # Disable TF32 paths and enforce deterministic cuDNN behaviour for GPUs such as H100/B200.
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision('highest')
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    global accelerator
+    mixed_precision_pref = config.get('mixed_precision', 'auto')
+    mixed_precision = select_accelerate_mixed_precision(mixed_precision_pref)
+
+    accelerator_kwargs = dict(project_dir=log_dir)
+    if mixed_precision != 'no':
+        accelerator_kwargs['mixed_precision'] = mixed_precision
+
+    accelerator = Accelerator(**accelerator_kwargs)
+
+    if accelerator.is_main_process:
+        logger.info(
+            "Using %s mixed precision on %s",
+            mixed_precision,
+            describe_cuda_device(),
+        )
+        shutil.copy(config_path, os.path.join(log_dir, os.path.basename(config_path)))
+        writer = SummaryWriter(log_dir + "/tensorboard")
+
+        # write logs
+        file_handler = logging.FileHandler(os.path.join(log_dir, 'train.log'))
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter('%(levelname)s:%(asctime)s: %(message)s'))
+        logger.addHandler(file_handler)
+    else:
+        writer = None
 
     
     batch_size = config.get('batch_size', 10)
@@ -625,18 +660,19 @@ def main(config_path):
                 logger.info ('Epoch [%d/%d], Step [%d/%d], Loss: %.5f, Disc Loss: %.5f, Dur Loss: %.5f, CE Loss: %.5f, Norm Loss: %.5f, F0 Loss: %.5f, LM Loss: %.5f, Gen Loss: %.5f, Sty Loss: %.5f, Diff Loss: %.5f, DiscLM Loss: %.5f, GenLM Loss: %.5f, SLoss: %.5f, S2S Loss: %.5f, Mono Loss: %.5f'
                     %(epoch+1, epochs, i+1, len(train_list)//batch_size, running_loss / log_interval, d_loss, loss_dur, loss_ce, loss_norm_rec, loss_F0_rec, loss_lm, loss_gen_all, loss_sty, loss_diff, d_loss_slm, loss_gen_lm, s_loss, loss_s2s, loss_mono))
                 
-                writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
-                writer.add_scalar('train/gen_loss', loss_gen_all, iters)
-                writer.add_scalar('train/d_loss', d_loss, iters)
-                writer.add_scalar('train/ce_loss', loss_ce, iters)
-                writer.add_scalar('train/dur_loss', loss_dur, iters)
-                writer.add_scalar('train/slm_loss', loss_lm, iters)
-                writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
-                writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
-                writer.add_scalar('train/sty_loss', loss_sty, iters)
-                writer.add_scalar('train/diff_loss', loss_diff, iters)
-                writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
-                writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
+                if writer is not None:
+                    writer.add_scalar('train/mel_loss', running_loss / log_interval, iters)
+                    writer.add_scalar('train/gen_loss', loss_gen_all, iters)
+                    writer.add_scalar('train/d_loss', d_loss, iters)
+                    writer.add_scalar('train/ce_loss', loss_ce, iters)
+                    writer.add_scalar('train/dur_loss', loss_dur, iters)
+                    writer.add_scalar('train/slm_loss', loss_lm, iters)
+                    writer.add_scalar('train/norm_loss', loss_norm_rec, iters)
+                    writer.add_scalar('train/F0_loss', loss_F0_rec, iters)
+                    writer.add_scalar('train/sty_loss', loss_sty, iters)
+                    writer.add_scalar('train/diff_loss', loss_diff, iters)
+                    writer.add_scalar('train/d_loss_slm', d_loss_slm, iters)
+                    writer.add_scalar('train/gen_loss_slm', loss_gen_lm, iters)
                 
                 running_loss = 0
                 
@@ -756,9 +792,10 @@ def main(config_path):
         print('Epochs:', epoch + 1)
         logger.info('Validation loss: %.3f, Dur loss: %.3f, F0 loss: %.3f' % (loss_test / iters_test, loss_align / iters_test, loss_f / iters_test) + '\n\n\n')
         print('\n\n\n')
-        writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)
-        writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
+        if writer is not None:
+            writer.add_scalar('eval/mel_loss', loss_test / iters_test, epoch + 1)
+            writer.add_scalar('eval/dur_loss', loss_test / iters_test, epoch + 1)
+            writer.add_scalar('eval/F0_loss', loss_f / iters_test, epoch + 1)
         
         
         if (epoch + 1) % save_freq == 0 :

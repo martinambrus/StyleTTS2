@@ -3,6 +3,7 @@ first_stage_path: "first_stage.pth"
 save_freq: 2
 log_interval: 10
 device: "cuda"
+mixed_precision: auto
 epochs_1st: 200 # number of epochs for first stage training (pre-training)
 epochs_2nd: 100 # number of peochs for second stage training (joint training)
 batch_size: 16
