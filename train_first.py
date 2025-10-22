@@ -30,7 +30,11 @@ import torch.nn.functional as F
 import time
 import logging
 
-from phoneme_dictionary import resolve_phoneme_dictionary_settings
+from phoneme_dictionary import (
+    DEFAULT_DICTIONARY_PATH,
+    infer_phoneme_dictionary_token_count,
+    resolve_phoneme_dictionary_settings,
+)
 
 
 
@@ -172,6 +176,11 @@ def main(config_path):
     if dictionary_settings:
         dataset_config['dictionary_config'] = dictionary_settings
 
+    dictionary_token_count = infer_phoneme_dictionary_token_count(
+        dictionary_source if dictionary_source is not None else DEFAULT_DICTIONARY_PATH,
+        dictionary_settings,
+    )
+
     max_len = config.get('max_len', 200)
 
     # load data
@@ -225,6 +234,16 @@ def main(config_path):
     }
     
     model_params = recursive_munch(config['model_params'])
+    if dictionary_token_count is not None:
+        configured_tokens = getattr(model_params, 'n_token', None)
+        if not isinstance(configured_tokens, int) or configured_tokens < dictionary_token_count:
+            if accelerator.is_main_process:
+                logger.info(
+                    "Adjusting n_token from %s to %s to match phoneme dictionary size",
+                    configured_tokens,
+                    dictionary_token_count,
+                )
+            model_params.n_token = dictionary_token_count
     multispeaker = model_params.multispeaker
     model = build_model(model_params, text_aligner, pitch_extractor, plbert)
 

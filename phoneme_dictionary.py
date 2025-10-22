@@ -21,6 +21,7 @@ __all__ = [
     "DEFAULT_DICTIONARY_PATH",
     "load_phoneme_dictionary",
     "resolve_phoneme_dictionary_settings",
+    "infer_phoneme_dictionary_token_count",
 ]
 
 
@@ -110,6 +111,49 @@ def load_phoneme_dictionary(
         dictionary = _load_dictionary(path)
         _LOCAL_CACHE[path] = dictionary
         return dict(dictionary)
+
+
+def infer_phoneme_dictionary_token_count(
+    path_or_mapping: Union[str, DictionaryLike, None],
+    config: Optional[Mapping] = None,
+) -> Optional[int]:
+    """Return the number of tokens addressed by ``path_or_mapping``.
+
+    Args:
+        path_or_mapping: Either a dictionary mapping phonemes to indexes or a
+            filesystem path to a CSV file containing the mapping.
+        config: Optional configuration passed to :func:`load_phoneme_dictionary`.
+
+    Returns:
+        The inferred vocabulary size (maximum index + 1) or ``None`` when the
+        dictionary could not be loaded or does not contain numeric indexes.
+    """
+
+    if path_or_mapping is None:
+        return None
+
+    try:
+        mapping = load_phoneme_dictionary(path_or_mapping, config=config)
+    except FileNotFoundError:
+        return None
+
+    if not mapping:
+        return None
+
+    max_index: Optional[int] = None
+    for value in mapping.values():
+        try:
+            index = int(value)
+        except (TypeError, ValueError):
+            continue
+
+        if max_index is None or index > max_index:
+            max_index = index
+
+    if max_index is None or max_index < 0:
+        return None
+
+    return max_index + 1
 
 
 def _cfg_get_nested(cfg: Mapping[str, Any], path, default=None, sep: str = "."):
