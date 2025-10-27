@@ -1146,6 +1146,7 @@ def _match_state_dict(module, loaded_state, module_name=""):
     aligned_state = OrderedDict()
     missing_keys = []
     resized_keys = []
+    incompatible_keys = []
 
     for name, current_tensor in current_state.items():
         if name not in loaded_state:
@@ -1186,10 +1187,8 @@ def _match_state_dict(module, loaded_state, module_name=""):
                 resized_keys.append((name, loaded_tensor.shape, current_tensor.shape))
                 continue
 
-        raise RuntimeError(
-            f"{module_name} parameter '{name}' has shape {current_tensor.shape} "
-            f"but checkpoint provides {loaded_tensor.shape}."
-        )
+        incompatible_keys.append((name, loaded_tensor.shape, current_tensor.shape))
+        aligned_state[name] = current_tensor
 
     extra_keys = [name for name in loaded_state.keys() if name not in current_state]
 
@@ -1201,6 +1200,13 @@ def _match_state_dict(module, loaded_state, module_name=""):
         print(
             f"Warning: unexpected keys in checkpoint for {module_name}: {', '.join(extra_keys)}"
         )
+    if incompatible_keys:
+        for name, old_shape, new_shape in incompatible_keys:
+            print(
+                "Warning: incompatible shape for "
+                f"{module_name} parameter '{name}': "
+                f"checkpoint {old_shape} vs. current {new_shape}. Keeping current weights."
+            )
     for name, old_shape, new_shape in resized_keys:
         print(
             f"Info: resized {module_name} parameter '{name}' from {old_shape} to {new_shape}"
