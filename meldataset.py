@@ -10,6 +10,12 @@ import torch
 import torchaudio
 import logging
 
+
+class UnreadableAudioError(RuntimeError):
+    """Raised when an audio file cannot be read by any available backend."""
+
+    pass
+
 from text_utils import DEFAULT_DICT_PATH, TextCleaner
 
 logger = logging.getLogger(__name__)
@@ -74,21 +80,55 @@ class FilePathDataset(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.data_list)
 
-    def __getitem__(self, idx):        
-        data = self.data_list[idx]
-        path = data[0]
-        
-        wave, text_tensor, speaker_id = self._load_tensor(data)
-        
+    def __getitem__(self, idx):
+        dataset_length = len(self.data_list)
+        attempts = 0
+        current_idx = idx
+
+        while attempts < dataset_length:
+            data = self.data_list[current_idx]
+            path = data[0]
+            try:
+                wave, text_tensor, speaker_id = self._load_tensor(data)
+                break
+            except UnreadableAudioError as exc:
+                logger.error("Skipping unreadable audio file %s: %s", path, exc)
+                attempts += 1
+                current_idx = (current_idx + 1) % dataset_length
+        else:
+            raise RuntimeError(
+                "Unable to load any readable audio files when starting from index %d" % idx
+            )
+
         mel_tensor = preprocess(wave).squeeze()
-        
+
         acoustic_feature = mel_tensor.squeeze()
         length_feature = acoustic_feature.size(1)
         acoustic_feature = acoustic_feature[:, :(length_feature - length_feature % 2)]
         
         # get reference sample
-        ref_data = (self.df[self.df[2] == str(speaker_id)]).sample(n=1).iloc[0].tolist()
-        ref_mel_tensor, ref_label = self._load_data(ref_data[:3])
+        ref_candidates = self.df[self.df[2] == str(speaker_id)]
+        if ref_candidates.empty:
+            raise RuntimeError(f"No reference data available for speaker {speaker_id}")
+
+        ref_attempts = 0
+        while True:
+            ref_data = ref_candidates.sample(n=1).iloc[0].tolist()
+            try:
+                ref_mel_tensor, ref_label = self._load_data(ref_data[:3])
+                break
+            except UnreadableAudioError as exc:
+                ref_attempts += 1
+                logger.error(
+                    "Skipping unreadable reference audio file %s for speaker %s: %s",
+                    ref_data[0],
+                    speaker_id,
+                    exc,
+                )
+                if ref_attempts >= len(ref_candidates):
+                    raise RuntimeError(
+                        f"No readable reference audio available for speaker {speaker_id}"
+                    ) from exc
         
         # get OOD text
         
@@ -109,7 +149,21 @@ class FilePathDataset(torch.utils.data.Dataset):
     def _load_tensor(self, data):
         wave_path, text, speaker_id = data
         speaker_id = int(speaker_id)
-        wave, sr = sf.read(os.path.join(self.root_path, wave_path))
+        audio_path = os.path.join(self.root_path, wave_path)
+        try:
+            wave, sr = sf.read(audio_path)
+        except Exception as exc:  # soundfile can raise RuntimeError or LibsndfileError
+            logger.warning("soundfile failed to read %s: %s", audio_path, exc)
+            try:
+                wave_tensor, sr = torchaudio.load(audio_path)
+            except Exception as torchaudio_exc:
+                raise UnreadableAudioError(
+                    f"Failed to load audio file '{audio_path}' with either soundfile or torchaudio"
+                ) from torchaudio_exc
+
+            wave = wave_tensor.squeeze(0).numpy()
+            if wave.ndim == 2:
+                wave = wave[0]
         if wave.shape[-1] == 2:
             wave = wave[:, 0].squeeze()
         if sr != 24000:
