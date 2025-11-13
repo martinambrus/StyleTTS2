@@ -1169,7 +1169,12 @@ def main(config_path):
                                 duration = torch.zeros_like(duration)
                         duration = torch.sigmoid(duration).sum(axis=-1)
                         if not torch.isfinite(duration).all():
-                            duration = torch.ones_like(duration)
+                            finite_mask = torch.isfinite(duration)
+                            duration = torch.where(
+                                finite_mask,
+                                duration,
+                                torch.ones_like(duration),
+                            )
                         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
                         pred_dur[-1] += 5
