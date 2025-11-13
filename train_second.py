@@ -1132,80 +1132,117 @@ def main(config_path):
                         ref_sp = model.predictor_encoder(ref_mels.unsqueeze(1))
                         ref_s = torch.cat([ref_ss, ref_sp], dim=1)
 
+                    max_duration_retries = 3
                     for bib in range(len(d_en)):
-                        if multispeaker:
-                            s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                              embedding=bert_dur[bib].unsqueeze(0),
-                              embedding_scale=1,
-                              features=ref_s[bib].unsqueeze(0), # reference from the same speaker as the embedding
-                              num_steps=5).squeeze(1)
-                        else:
-                            s_pred = sampler(noise = torch.randn((1, 256)).unsqueeze(1).to(texts.device),
-                              embedding=bert_dur[bib].unsqueeze(0),
-                              embedding_scale=1,
-                              num_steps=5).squeeze(1)
+                        valid_duration = False
+                        last_error = None
 
-                        s = s_pred[:, 128:]
-                        ref = s_pred[:, :128]
-
-                        d = predictor_module.text_encoder(d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
-                                                         s, input_lengths[bib, ...].unsqueeze(0), text_mask[bib, :input_lengths[bib]].unsqueeze(0))
-
-                        x, _ = predictor_module.lstm(d)
-                        duration = predictor_module.duration_proj(x)
-                        if not torch.isfinite(duration).all():
-                            finite_mask = torch.isfinite(duration)
-                            if finite_mask.any():
-                                safe_duration = torch.where(
-                                    finite_mask,
-                                    duration,
-                                    torch.zeros_like(duration),
-                                )
-                                counts = finite_mask.sum(dim=-1, keepdim=True).clamp_min(1)
-                                counts = counts.to(duration.dtype)
-                                means = safe_duration.sum(dim=-1, keepdim=True) / counts
-                                duration = torch.where(finite_mask, duration, means)
+                        for attempt in range(max_duration_retries):
+                            if multispeaker:
+                                s_pred_candidate = sampler(
+                                    noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                                    embedding=bert_dur[bib].unsqueeze(0),
+                                    embedding_scale=1,
+                                    features=ref_s[bib].unsqueeze(0),  # reference from the same speaker as the embedding
+                                    num_steps=5,
+                                ).squeeze(1)
                             else:
-                                duration = torch.zeros_like(duration)
-                        duration = torch.sigmoid(duration).sum(axis=-1)
-                        if not torch.isfinite(duration).all():
-                            duration = torch.ones_like(duration)
-                        pred_dur = torch.round(duration.squeeze()).clamp(min=1)
+                                s_pred_candidate = sampler(
+                                    noise=torch.randn((1, 256)).unsqueeze(1).to(texts.device),
+                                    embedding=bert_dur[bib].unsqueeze(0),
+                                    embedding_scale=1,
+                                    num_steps=5,
+                                ).squeeze(1)
 
-                        pred_dur[-1] += 5
+                            s_candidate = s_pred_candidate[:, 128:]
+                            ref_candidate = s_pred_candidate[:, :128]
 
-                        pred_aln_trg = torch.zeros(input_lengths[bib], int(pred_dur.sum().data))
-                        c_frame = 0
-                        for i in range(pred_aln_trg.size(0)):
-                            pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
-                            c_frame += int(pred_dur[i].data)
+                            d_candidate = predictor_module.text_encoder(
+                                d_en[bib, :, :input_lengths[bib]].unsqueeze(0),
+                                s_candidate,
+                                input_lengths[bib, ...].unsqueeze(0),
+                                text_mask[bib, :input_lengths[bib]].unsqueeze(0),
+                            )
 
-                        # encode prosody
-                        en = (
-                            d.transpose(-1, -2)
-                            @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                        )
-                        F0_pred, N_pred = model.predictor(
-                            _clone_if_grad(en),
-                            _clone_if_grad(s),
-                            forward_mode="f0",
-                        )
-                        decoder_input = (
-                            t_en[bib, :, :input_lengths[bib]]
-                            .unsqueeze(0)
-                            @ pred_aln_trg.unsqueeze(0).to(texts.device)
-                        )
-                        out = model.decoder(
-                            _clone_if_grad(decoder_input),
-                            F0_pred,
-                            N_pred,
-                            _clone_if_grad(ref.squeeze().unsqueeze(0)),
-                        )
+                            x_candidate, _ = predictor_module.lstm(d_candidate)
+                            duration_logits = predictor_module.duration_proj(x_candidate)
+                            attempt_error = None
 
-                        writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+                            if not torch.isfinite(duration_logits).all():
+                                attempt_error = "non-finite duration logits"
+                            else:
+                                duration = torch.sigmoid(duration_logits).sum(axis=-1)
 
-                        if bib >= 5:
-                            break
+                                if not torch.isfinite(duration).all():
+                                    attempt_error = "non-finite post-sigmoid durations"
+                                else:
+                                    pred_dur_candidate = torch.round(duration.squeeze()).clamp(min=1)
+
+                                    if not torch.isfinite(pred_dur_candidate).all():
+                                        attempt_error = "non-finite rounded durations"
+                                    else:
+                                        total_frames = pred_dur_candidate.sum()
+
+                                        if not torch.isfinite(total_frames):
+                                            attempt_error = "invalid total duration"
+                                        elif total_frames.item() <= 0:
+                                            attempt_error = "invalid total duration"
+                                        else:
+                                            valid_duration = True
+                                            s_pred = s_pred_candidate
+                                            s = s_candidate
+                                            ref = ref_candidate
+                                            d = d_candidate
+                                            pred_dur = pred_dur_candidate
+                                            total_duration_frames = total_frames
+
+                            if valid_duration:
+                                break
+
+                            last_error = attempt_error
+
+                        if valid_duration:
+                            pred_dur[-1] += 5
+
+                            pred_aln_trg = torch.zeros(
+                                input_lengths[bib], int(total_duration_frames.item())
+                            )
+                            c_frame = 0
+                            for i in range(pred_aln_trg.size(0)):
+                                pred_aln_trg[i, c_frame:c_frame + int(pred_dur[i].data)] = 1
+                                c_frame += int(pred_dur[i].data)
+
+                            # encode prosody
+                            en = (
+                                d.transpose(-1, -2)
+                                @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                            )
+                            F0_pred, N_pred = model.predictor(
+                                _clone_if_grad(en),
+                                _clone_if_grad(s),
+                                forward_mode="f0",
+                            )
+                            decoder_input = (
+                                t_en[bib, :, :input_lengths[bib]]
+                                .unsqueeze(0)
+                                @ pred_aln_trg.unsqueeze(0).to(texts.device)
+                            )
+                            out = model.decoder(
+                                _clone_if_grad(decoder_input),
+                                F0_pred,
+                                N_pred,
+                                _clone_if_grad(ref.squeeze().unsqueeze(0)),
+                            )
+
+                            writer.add_audio('pred/y' + str(bib), out.cpu().numpy().squeeze(), epoch, sample_rate=sr)
+
+                            if bib >= 5:
+                                break
+                        else:
+                            if accelerator is not None:
+                                accelerator.print(
+                                    f"Skipping predicted sample for index {bib} due to {last_error or 'unknown duration error'}"
+                                )
 
         #_log_rank_debug(accelerator, f"epoch {epoch}: entering post-epoch barrier before save check")
         accelerator.wait_for_everyone()
