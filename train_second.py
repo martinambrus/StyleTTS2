@@ -1153,12 +1153,28 @@ def main(config_path):
 
                         x, _ = predictor_module.lstm(d)
                         duration = predictor_module.duration_proj(x)
-                        duration = torch.nan_to_num(
-                            duration, nan=0.0, posinf=20.0, neginf=-20.0
-                        )
+                        if not torch.isfinite(duration).all():
+                            finite_mask = torch.isfinite(duration)
+                            if finite_mask.any():
+                                safe_duration = torch.where(
+                                    finite_mask,
+                                    duration,
+                                    torch.zeros_like(duration),
+                                )
+                                counts = finite_mask.sum(dim=-1, keepdim=True).clamp_min(1)
+                                counts = counts.to(duration.dtype)
+                                means = safe_duration.sum(dim=-1, keepdim=True) / counts
+                                duration = torch.where(finite_mask, duration, means)
+                            else:
+                                duration = torch.zeros_like(duration)
                         duration = torch.sigmoid(duration).sum(axis=-1)
                         if not torch.isfinite(duration).all():
-                            duration = torch.ones_like(duration)
+                            finite_mask = torch.isfinite(duration)
+                            duration = torch.where(
+                                finite_mask,
+                                duration,
+                                torch.ones_like(duration),
+                            )
                         pred_dur = torch.round(duration.squeeze()).clamp(min=1)
 
                         pred_dur[-1] += 5
