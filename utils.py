@@ -1,5 +1,6 @@
 from monotonic_align import maximum_path
 from monotonic_align.core import maximum_path_c
+import math
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -51,12 +52,18 @@ def log_norm(x, mean=-4, std=4, dim=2):
     turn, caused downstream losses to become ``nan`` during training.  By
     expressing the computation in terms of ``logsumexp`` we avoid constructing
     these large intermediate values while retaining the same mathematical
-    result.
+    result.  In addition, padded regions in the input can yield all ``-inf``
+    activations which previously propagated ``nan`` gradients; we clamp the
+    log-sum-exp to a finite minimum to keep the target stable.
     """
 
     scaled = x * std + mean
-    log_sum = torch.logsumexp(2 * scaled, dim=dim)
-    return 0.5 * log_sum
+    log_sum = torch.logsumexp(2 * scaled.float(), dim=dim)
+
+    min_log_value = math.log(torch.finfo(log_sum.dtype).tiny)
+    log_sum_clamped = torch.clamp(log_sum, min=min_log_value)
+
+    return 0.5 * log_sum_clamped.to(scaled.dtype)
 
 def get_image(arrs):
     plt.switch_backend('agg')
