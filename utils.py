@@ -43,11 +43,20 @@ def length_to_mask(lengths):
 
 # for norm consistency loss
 def log_norm(x, mean=-4, std=4, dim=2):
+    """Compute a numerically-stable log magnitude norm.
+
+    The previous implementation exponentiated the input and then took the
+    logarithm of the resulting norm.  When ``x`` contained large positive
+    values this intermediate exponential could overflow to ``inf`` which, in
+    turn, caused downstream losses to become ``nan`` during training.  By
+    expressing the computation in terms of ``logsumexp`` we avoid constructing
+    these large intermediate values while retaining the same mathematical
+    result.
     """
-    normalized log mel -> mel -> norm -> log(norm)
-    """
-    x = torch.log(torch.exp(x * std + mean).norm(dim=dim))
-    return x
+
+    scaled = x * std + mean
+    log_sum = torch.logsumexp(2 * scaled, dim=dim)
+    return 0.5 * log_sum
 
 def get_image(arrs):
     plt.switch_backend('agg')
