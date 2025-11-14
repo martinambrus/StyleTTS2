@@ -46,24 +46,37 @@ def length_to_mask(lengths):
 def log_norm(x, mean=-4, std=4, dim=2):
     """Compute a numerically-stable log magnitude norm.
 
-    The previous implementation exponentiated the input and then took the
-    logarithm of the resulting norm.  When ``x`` contained large positive
-    values this intermediate exponential could overflow to ``inf`` which, in
-    turn, caused downstream losses to become ``nan`` during training.  By
-    expressing the computation in terms of ``logsumexp`` we avoid constructing
-    these large intermediate values while retaining the same mathematical
-    result.  In addition, padded regions in the input can yield all ``-inf``
-    activations which previously propagated ``nan`` gradients; we clamp the
-    log-sum-exp to a finite minimum to keep the target stable.
+    Training can push the latent magnitudes feeding this helper well outside
+    the range that single-precision arithmetic can represent.  The previous
+    fixes avoided overflow in typical scenarios but still allowed extremely
+    large activations to turn into ``inf``/``nan`` which then poisoned the
+    gradients for the rest of the epoch.  To make the routine fully robust we
+    perform the reduction in float64, sanitise any non-finite inputs with
+    :func:`torch.nan_to_num`, and clamp the intermediate results to the largest
+    representable magnitudes for the working dtype.  This sacrifices no
+    precision in the usual operating regime while ensuring the function always
+    returns finite values, even for adversarially large activations or entirely
+    padded regions.
     """
 
     scaled = x * std + mean
-    log_sum = torch.logsumexp(2 * scaled.float(), dim=dim)
 
-    min_log_value = math.log(torch.finfo(log_sum.dtype).tiny)
-    log_sum_clamped = torch.clamp(log_sum, min=min_log_value)
+    working = scaled.to(torch.float64)
+    finfo = torch.finfo(working.dtype)
+    # When ``working`` is extremely large we still want ``2 * working`` to be
+    # within the representable range of ``logsumexp``.  The log of the maximum
+    # finite value gives us that boundary.
+    clamp_bound = 0.5 * math.log(finfo.max)
+    working = torch.nan_to_num(working, nan=0.0, posinf=clamp_bound, neginf=-clamp_bound)
+    working = torch.clamp(working, min=-clamp_bound, max=clamp_bound)
 
-    return 0.5 * log_sum_clamped.to(scaled.dtype)
+    log_sum = torch.logsumexp(2 * working, dim=dim)
+
+    min_log_value = math.log(finfo.tiny)
+    max_log_value = math.log(finfo.max)
+    log_sum = torch.clamp(log_sum, min=min_log_value, max=max_log_value)
+
+    return 0.5 * log_sum.to(scaled.dtype)
 
 def get_image(arrs):
     plt.switch_backend('agg')
