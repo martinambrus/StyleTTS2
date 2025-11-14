@@ -1,6 +1,5 @@
 from monotonic_align import maximum_path
 from monotonic_align.core import maximum_path_c
-import math
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -43,40 +42,79 @@ def length_to_mask(lengths):
     return mask
 
 # for norm consistency loss
-def log_norm(x, mean=-4, std=4, dim=2):
-    """Compute a numerically-stable log magnitude norm.
+def log_norm(x, mean=-4, std=4, dim=2, clamp=(-60.0, 60.0), eps=1e-20):
+    """Compute ``log ||exp(x * std + mean)||`` with aggressive sanitisation.
 
-    Training can push the latent magnitudes feeding this helper well outside
-    the range that single-precision arithmetic can represent.  The previous
-    fixes avoided overflow in typical scenarios but still allowed extremely
-    large activations to turn into ``inf``/``nan`` which then poisoned the
-    gradients for the rest of the epoch.  To make the routine fully robust we
-    perform the reduction in float64, sanitise any non-finite inputs with
-    :func:`torch.nan_to_num`, and clamp the intermediate results to the largest
-    representable magnitudes for the working dtype.  This sacrifices no
-    precision in the usual operating regime while ensuring the function always
-    returns finite values, even for adversarially large activations or entirely
-    padded regions.
+    The helper guards the norm-consistency loss against pathological inputs by
+    (1) moving the computation into float64, (2) replacing non-finite values,
+    (3) applying a log-sum-exp formulation centred around the maximum element to
+    avoid overflow, and (4) clamping the final activations to a conservative
+    range that still covers typical speech magnitudes.  These safeguards ensure
+    that the downstream predictor never receives ``nan``/``inf`` targets while
+    keeping gradients well behaved.
     """
 
+    if not isinstance(x, torch.Tensor):
+        raise TypeError("log_norm expects a torch.Tensor input")
+
     scaled = x * std + mean
+    # Replace NaNs/Infs before promoting the dtype to avoid propagating them.
+    scaled = torch.nan_to_num(scaled, nan=mean, posinf=mean + 10 * std, neginf=mean - 10 * std)
 
     working = scaled.to(torch.float64)
+    if working.ndim == 0:
+        working = working.unsqueeze(0)
+
+    dim = dim if dim >= 0 else working.ndim + dim
+
     finfo = torch.finfo(working.dtype)
-    # When ``working`` is extremely large we still want ``2 * working`` to be
-    # within the representable range of ``logsumexp``.  The log of the maximum
-    # finite value gives us that boundary.
-    clamp_bound = 0.5 * math.log(finfo.max)
-    working = torch.nan_to_num(working, nan=0.0, posinf=clamp_bound, neginf=-clamp_bound)
-    working = torch.clamp(working, min=-clamp_bound, max=clamp_bound)
 
-    log_sum = torch.logsumexp(2 * working, dim=dim)
+    finite_mask = torch.isfinite(working)
+    if not finite_mask.all():
+        working = torch.where(finite_mask, working, working.new_full((), mean))
 
-    min_log_value = math.log(finfo.tiny)
-    max_log_value = math.log(finfo.max)
-    log_sum = torch.clamp(log_sum, min=min_log_value, max=max_log_value)
+    max_val, _ = working.max(dim=dim, keepdim=True)
+    max_val = torch.where(torch.isfinite(max_val), max_val, working.new_full(max_val.shape, mean))
 
-    return 0.5 * log_sum.to(scaled.dtype)
+    centered = working - max_val
+    sum_exp = torch.exp(2 * centered).sum(dim=dim)
+    sum_exp = torch.nan_to_num(sum_exp, nan=0.0, posinf=finfo.max)
+
+    log_values = max_val.squeeze(dim) + 0.5 * torch.log(sum_exp + eps)
+    log_values = torch.nan_to_num(log_values, nan=mean, posinf=finfo.max, neginf=-finfo.max)
+
+    if clamp is not None:
+        clamp_min, clamp_max = clamp
+        if clamp_min is not None:
+            log_values = torch.maximum(log_values, log_values.new_tensor(clamp_min))
+        if clamp_max is not None:
+            log_values = torch.minimum(log_values, log_values.new_tensor(clamp_max))
+
+    return log_values.to(scaled.dtype)
+
+
+def ensure_finite(tensor, *, clamp=None, fill_value=0.0):
+    """Replace non-finite values in ``tensor`` and optionally clamp its range."""
+
+    if tensor is None or not isinstance(tensor, torch.Tensor):
+        return tensor
+
+    if not tensor.is_floating_point():
+        return tensor
+
+    finfo = torch.finfo(tensor.dtype)
+    if clamp is None:
+        min_val, max_val = -finfo.max, finfo.max
+    else:
+        min_val, max_val = clamp
+        if min_val is None:
+            min_val = -finfo.max
+        if max_val is None:
+            max_val = finfo.max
+
+    sanitized = torch.nan_to_num(tensor, nan=fill_value, posinf=max_val, neginf=min_val)
+    sanitized = sanitized.clamp(min=min_val, max=max_val)
+    return sanitized
 
 def get_image(arrs):
     plt.switch_backend('agg')

@@ -4,6 +4,7 @@ from Utils.PLBERT.util import load_plbert
 from models import build_model, load_ASR_models, load_checkpoint, load_F0_models
 from utils import (
     describe_cuda_device,
+    ensure_finite,
     get_data_path_list,
     length_to_mask,
     log_norm,
@@ -686,15 +687,19 @@ def main(config_path):
             
             with torch.no_grad():
                 F0_real, _, F0 = _run_pitch_extractor(model.pitch_extractor, gt.unsqueeze(1))
+                F0_real = ensure_finite(F0_real, clamp=(0.0, 2000.0))
                 if isinstance(F0, torch.Tensor):
                     F0 = F0.reshape(F0.shape[0], F0.shape[1] * 2, F0.shape[2], 1).squeeze()
+                    F0 = ensure_finite(F0, clamp=(0.0, 2000.0))
 
                 N_real = log_norm(gt.unsqueeze(1)).squeeze(1)
-                
+                N_real = ensure_finite(N_real, clamp=(-60.0, 60.0))
+
                 y_rec_gt = wav.unsqueeze(1)
                 y_rec_gt_pred = model.decoder(
                     _clone_if_grad(en), F0_real, N_real, _clone_if_grad(s)
                 )
+                y_rec_gt_pred = ensure_finite(y_rec_gt_pred, clamp=(-5.0, 5.0))
 
                 if epoch >= joint_epoch:
                     # ground truth from recording
@@ -708,10 +713,29 @@ def main(config_path):
                 _clone_if_grad(s_dur),
                 forward_mode="f0",
             )
+            F0_fake = ensure_finite(F0_fake, clamp=(0.0, 2000.0))
+            N_fake = ensure_finite(N_fake, clamp=(-60.0, 60.0))
 
             y_rec = model.decoder(
                 _clone_if_grad(en), F0_fake, N_fake, _clone_if_grad(s)
             )
+            y_rec = ensure_finite(y_rec, clamp=(-5.0, 5.0))
+
+            invalid_activations = []
+            for name, value in (
+                ("F0_real", F0_real),
+                ("F0_fake", F0_fake),
+                ("N_real", N_real),
+                ("N_fake", N_fake),
+                ("y_rec", y_rec),
+                ("y_rec_gt_pred", y_rec_gt_pred),
+            ):
+                if isinstance(value, torch.Tensor) and not torch.isfinite(value).all():
+                    invalid_activations.append(name)
+
+            if invalid_activations:
+                _log_rank_debug(accelerator, f"Skipping batch because of non-finite activations: {invalid_activations}")
+                continue
 
             loss_F0_rec =  (F.smooth_l1_loss(F0_real, F0_fake)) / 10
             loss_norm_rec = F.smooth_l1_loss(N_real, N_fake)
@@ -765,6 +789,24 @@ def main(config_path):
                 + loss_params.lambda_sty * loss_sty
                 + loss_params.lambda_diff * loss_diff
             )
+
+            loss_map = {
+                'loss_mel': loss_mel,
+                'loss_gen_all': loss_gen_all,
+                'loss_lm': loss_lm,
+                'loss_ce': loss_ce,
+                'loss_dur': loss_dur,
+                'loss_norm_rec': loss_norm_rec,
+                'loss_F0_rec': loss_F0_rec,
+                'loss_diff': loss_diff,
+                'loss_sty': loss_sty,
+                'g_loss': g_loss,
+            }
+
+            non_finite_losses = [name for name, value in loss_map.items() if not torch.isfinite(value).all()]
+            if non_finite_losses:
+                _log_rank_debug(accelerator, f"Skipping batch because of non-finite losses: {non_finite_losses}")
+                continue
 
             loss_mel_value = accelerator.gather(loss_mel.detach()).mean().item()
             running_loss += loss_mel_value
