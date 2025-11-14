@@ -22,6 +22,7 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 from accelerate.utils import set_seed
 from accelerate.logging import get_logger
+from torch.nn.utils import clip_grad_norm_
 
 import logging
 import os
@@ -34,6 +35,7 @@ import shutil
 import traceback
 import torch.nn.functional as F
 import random
+import math
 
 from phoneme_dictionary import (
     DEFAULT_DICTIONARY_PATH,
@@ -172,6 +174,44 @@ def _checkpoint_state(accelerator, model, optimizer, *, iters, val_loss, epoch, 
 logger = get_logger(__name__, log_level="DEBUG")
 
 
+def _iter_grad_parameters(named_modules):
+    for module_name, module in named_modules:
+        if module is None:
+            continue
+        for name, param in module.named_parameters():
+            if not param.requires_grad or param.grad is None:
+                continue
+            yield module_name, name, param
+
+
+def _validate_gradients(accelerator, named_modules, stage, clip_norm=None):
+    params = []
+    invalid = []
+
+    for module_name, param_name, param in _iter_grad_parameters(named_modules):
+        if not torch.isfinite(param.grad).all():
+            invalid.append(f"{module_name}.{param_name}")
+        params.append(param)
+
+    if invalid:
+        _log_rank_debug(
+            accelerator,
+            f"Skipping {stage} update because of non-finite gradients in {invalid}",
+        )
+        return False
+
+    if clip_norm is not None and params:
+        total_norm = clip_grad_norm_(params, clip_norm)
+        if torch.isnan(total_norm) or torch.isinf(total_norm):
+            _log_rank_debug(
+                accelerator,
+                f"Skipping {stage} update because gradient norm is non-finite ({total_norm})",
+            )
+            return False
+
+    return True
+
+
 @click.command()
 @click.option('-p', '--config_path', default='Configs/config.yml', type=str)
 def main(config_path):
@@ -179,6 +219,14 @@ def main(config_path):
 
     log_dir = config['log_dir']
     os.makedirs(log_dir, exist_ok=True)
+
+    gradient_clip_norm = config.get('grad_clip_norm', 5.0)
+    try:
+        gradient_clip_norm = float(gradient_clip_norm)
+    except (TypeError, ValueError):
+        gradient_clip_norm = 5.0
+    if gradient_clip_norm <= 0:
+        gradient_clip_norm = None
 
     # Disable TF32 paths and enforce deterministic cuDNN behaviour for GPUs such as H100/B200.
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -744,8 +792,21 @@ def main(config_path):
                 optimizer.zero_grad()
                 d_loss = dl(wav.detach(), y_rec.detach()).mean()
                 accelerator.backward(d_loss)
-                optimizer.step('msd')
-                optimizer.step('mpd')
+
+                if _validate_gradients(
+                    accelerator,
+                    (
+                        ('mpd', model.get('mpd')),
+                        ('msd', model.get('msd')),
+                    ),
+                    'discriminator',
+                    clip_norm=gradient_clip_norm,
+                ):
+                    optimizer.step('msd')
+                    optimizer.step('mpd')
+                else:
+                    optimizer.zero_grad()
+                    d_loss = torch.zeros_like(d_loss)
             else:
                 d_loss = torch.zeros(1, device=device)
 
@@ -812,6 +873,31 @@ def main(config_path):
             running_loss += loss_mel_value
             accelerator.backward(g_loss)
 
+            grad_keys = [
+                ('bert_encoder', model.get('bert_encoder')),
+                ('bert', model.get('bert')),
+                ('predictor', model.get('predictor')),
+                ('predictor_encoder', model.get('predictor_encoder')),
+            ]
+            if epoch >= diff_epoch:
+                grad_keys.append(('diffusion', model.get('diffusion')))
+            if epoch >= joint_epoch:
+                grad_keys.extend(
+                    [
+                        ('style_encoder', model.get('style_encoder')),
+                        ('decoder', model.get('decoder')),
+                    ]
+                )
+
+            if not _validate_gradients(
+                accelerator,
+                grad_keys,
+                'generator',
+                clip_norm=gradient_clip_norm,
+            ):
+                optimizer.zero_grad()
+                continue
+
             optimizer.step('bert_encoder')
             optimizer.step('bert')
             optimizer.step('predictor')
@@ -864,17 +950,12 @@ def main(config_path):
                 if slm_out is None:
                     d_loss_slm = torch.zeros(1, device=device)
                     loss_gen_lm = torch.zeros(1, device=device)
-                    loss_gen_lm_value = 0.0
-                    d_loss_slm_value = 0.0
                     should_run_discriminator = False
                 else:
                     d_loss_slm, loss_gen_lm, y_pred = slm_out
 
                     if not isinstance(d_loss_slm, torch.Tensor):
                         d_loss_slm = torch.tensor(d_loss_slm, device=device, dtype=loss_gen_lm.dtype)
-
-                    loss_gen_lm_value = accelerator.gather(loss_gen_lm.detach()).mean().item()
-                    d_loss_slm_value = accelerator.gather(d_loss_slm.detach()).mean().item()
 
                     disc_flag = torch.tensor(
                         1 if torch.any(d_loss_slm.detach() != 0) else 0,
@@ -890,7 +971,16 @@ def main(config_path):
                     if should_run_discriminator:
                         optimizer.zero_grad()
                         accelerator.backward(d_loss_slm)
-                        optimizer.step('wd')
+                        if _validate_gradients(
+                            accelerator,
+                            (('wd', model.get('wd')),),
+                            'slm_discriminator',
+                            clip_norm=gradient_clip_norm,
+                        ):
+                            optimizer.step('wd')
+                        else:
+                            optimizer.zero_grad()
+                            d_loss_slm = torch.zeros_like(d_loss_slm)
                     else:
                         optimizer.zero_grad()
                         accelerator.backward(loss_gen_lm)
@@ -901,40 +991,64 @@ def main(config_path):
                             parameters = [p for p in model[key].parameters() if p.grad is not None and p.requires_grad]
                             for p in parameters:
                                 param_norm = p.grad.detach().data.norm(2)
+                                if torch.isnan(param_norm) or torch.isinf(param_norm):
+                                    continue
                                 total_norm[key] += param_norm.item() ** 2
                             total_norm[key] = total_norm[key] ** 0.5
 
-                        if total_norm.get('predictor', 0) > slmadv_params.thresh:
-                            scale = 1 / max(total_norm['predictor'], 1e-12)
-                            for key in model.keys():
-                                for p in model[key].parameters():
-                                    if p.grad is not None:
-                                        p.grad *= scale
+                        grad_ok = _validate_gradients(
+                            accelerator,
+                            (
+                                ('bert_encoder', model.get('bert_encoder')),
+                                ('bert', model.get('bert')),
+                                ('predictor', model.get('predictor')),
+                                ('diffusion', model.get('diffusion')),
+                            ),
+                            'slm_generator',
+                            clip_norm=gradient_clip_norm,
+                        )
 
-                        for p in predictor_module.duration_proj.parameters():
-                            if p.grad is not None:
-                                p.grad *= slmadv_params.scale
+                        if grad_ok:
+                            predictor_norm = total_norm.get('predictor', 0.0)
+                            if math.isfinite(predictor_norm) and predictor_norm > slmadv_params.thresh:
+                                scale = 1 / max(predictor_norm, 1e-12)
+                                for key in model.keys():
+                                    for p in model[key].parameters():
+                                        if p.grad is not None:
+                                            p.grad *= scale
 
-                        for p in predictor_module.lstm.parameters():
-                            if p.grad is not None:
-                                p.grad *= slmadv_params.scale
+                            for p in predictor_module.duration_proj.parameters():
+                                if p.grad is not None:
+                                    p.grad *= slmadv_params.scale
 
-                        for p in model.diffusion.parameters():
-                            if p.grad is not None:
-                                p.grad *= slmadv_params.scale
+                            for p in predictor_module.lstm.parameters():
+                                if p.grad is not None:
+                                    p.grad *= slmadv_params.scale
 
-                        optimizer.step('bert_encoder')
-                        optimizer.step('bert')
-                        optimizer.step('predictor')
-                        optimizer.step('diffusion')
+                            for p in model.diffusion.parameters():
+                                if p.grad is not None:
+                                    p.grad *= slmadv_params.scale
+
+                            optimizer.step('bert_encoder')
+                            optimizer.step('bert')
+                            optimizer.step('predictor')
+                            optimizer.step('diffusion')
+                        else:
+                            optimizer.zero_grad()
+                            loss_gen_lm = torch.zeros_like(loss_gen_lm)
+                            d_loss_slm = torch.zeros_like(d_loss_slm)
                 if slm_out is None:
                     should_run_discriminator = False
+
+                d_loss_slm = torch.nan_to_num(d_loss_slm, nan=0.0, posinf=0.0, neginf=0.0)
+                loss_gen_lm = torch.nan_to_num(loss_gen_lm, nan=0.0, posinf=0.0, neginf=0.0)
 
             else:
                 d_loss_slm = torch.zeros(1, device=device)
                 loss_gen_lm = torch.zeros(1, device=device)
-                loss_gen_lm_value = 0.0
-                d_loss_slm_value = 0.0
+
+            loss_gen_lm_value = accelerator.gather(loss_gen_lm.detach()).mean().item()
+            d_loss_slm_value = accelerator.gather(d_loss_slm.detach()).mean().item()
 
             loss_gen_all_value = accelerator.gather(loss_gen_all.detach()).mean().item()
             loss_lm_value = accelerator.gather(loss_lm.detach()).mean().item()

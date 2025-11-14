@@ -21,7 +21,10 @@ class SpectralConvergengeLoss(torch.nn.Module):
         Returns:
             Tensor: Spectral convergence loss value.
         """
-        return torch.norm(y_mag - x_mag, p=1) / torch.norm(y_mag, p=1)
+        numerator = torch.norm(y_mag - x_mag, p=1)
+        denominator = torch.norm(y_mag, p=1)
+        loss = numerator / (denominator + 1e-7)
+        return torch.nan_to_num(loss, nan=0.0, posinf=0.0, neginf=0.0)
 
 class STFTLoss(torch.nn.Module):
     """STFT loss module."""
@@ -52,9 +55,9 @@ class STFTLoss(torch.nn.Module):
         y_mag = self.to_mel(y)
         mean, std = -4, 4
         y_mag = (torch.log(1e-5 + y_mag) - mean) / std
-        
-        sc_loss = self.spectral_convergenge_loss(x_mag, y_mag)    
-        return sc_loss
+
+        sc_loss = self.spectral_convergenge_loss(x_mag, y_mag)
+        return torch.nan_to_num(sc_loss, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 class MultiResolutionSTFTLoss(torch.nn.Module):
