@@ -187,11 +187,31 @@ def _iter_grad_parameters(named_modules):
 def _validate_gradients(accelerator, named_modules, stage, clip_norm=None):
     params = []
     invalid = []
+    sanitized = []
 
     for module_name, param_name, param in _iter_grad_parameters(named_modules):
-        if not torch.isfinite(param.grad).all():
-            invalid.append(f"{module_name}.{param_name}")
+        grad = param.grad
+        if grad is None:
+            continue
+
+        if not torch.isfinite(grad).all():
+            torch.nan_to_num_(grad, nan=0.0, posinf=0.0, neginf=0.0)
+            if torch.isfinite(grad).all():
+                sanitized.append(f"{module_name}.{param_name}")
+            else:
+                invalid.append(f"{module_name}.{param_name}")
+                continue
+
         params.append(param)
+
+    if sanitized:
+        preview = ", ".join(sanitized[:8])
+        if len(sanitized) > 8:
+            preview += ", ..."
+        _log_rank_debug(
+            accelerator,
+            f"Sanitized non-finite gradients for {stage} on {preview}",
+        )
 
     if invalid:
         _log_rank_debug(
@@ -969,74 +989,92 @@ def main(config_path):
                         should_run_discriminator = bool(disc_flag.item())
 
                     if should_run_discriminator:
-                        optimizer.zero_grad()
-                        accelerator.backward(d_loss_slm)
-                        if _validate_gradients(
-                            accelerator,
-                            (('wd', model.get('wd')),),
-                            'slm_discriminator',
-                            clip_norm=gradient_clip_norm,
-                        ):
-                            optimizer.step('wd')
-                        else:
+                        if not torch.isfinite(d_loss_slm).all():
+                            _log_rank_debug(
+                                accelerator,
+                                'Skipping slm_discriminator update because loss is non-finite',
+                            )
                             optimizer.zero_grad()
                             d_loss_slm = torch.zeros_like(d_loss_slm)
-                    else:
-                        optimizer.zero_grad()
-                        accelerator.backward(loss_gen_lm)
-
-                        total_norm = {}
-                        for key in model.keys():
-                            total_norm[key] = 0
-                            parameters = [p for p in model[key].parameters() if p.grad is not None and p.requires_grad]
-                            for p in parameters:
-                                param_norm = p.grad.detach().data.norm(2)
-                                if torch.isnan(param_norm) or torch.isinf(param_norm):
-                                    continue
-                                total_norm[key] += param_norm.item() ** 2
-                            total_norm[key] = total_norm[key] ** 0.5
-
-                        grad_ok = _validate_gradients(
-                            accelerator,
-                            (
-                                ('bert_encoder', model.get('bert_encoder')),
-                                ('bert', model.get('bert')),
-                                ('predictor', model.get('predictor')),
-                                ('diffusion', model.get('diffusion')),
-                            ),
-                            'slm_generator',
-                            clip_norm=gradient_clip_norm,
-                        )
-
-                        if grad_ok:
-                            predictor_norm = total_norm.get('predictor', 0.0)
-                            if math.isfinite(predictor_norm) and predictor_norm > slmadv_params.thresh:
-                                scale = 1 / max(predictor_norm, 1e-12)
-                                for key in model.keys():
-                                    for p in model[key].parameters():
-                                        if p.grad is not None:
-                                            p.grad *= scale
-
-                            for p in predictor_module.duration_proj.parameters():
-                                if p.grad is not None:
-                                    p.grad *= slmadv_params.scale
-
-                            for p in predictor_module.lstm.parameters():
-                                if p.grad is not None:
-                                    p.grad *= slmadv_params.scale
-
-                            for p in model.diffusion.parameters():
-                                if p.grad is not None:
-                                    p.grad *= slmadv_params.scale
-
-                            optimizer.step('bert_encoder')
-                            optimizer.step('bert')
-                            optimizer.step('predictor')
-                            optimizer.step('diffusion')
+                            should_run_discriminator = False
                         else:
+                            optimizer.zero_grad()
+                            accelerator.backward(d_loss_slm)
+                            if _validate_gradients(
+                                accelerator,
+                                (('wd', model.get('wd')),),
+                                'slm_discriminator',
+                                clip_norm=gradient_clip_norm,
+                            ):
+                                optimizer.step('wd')
+                            else:
+                                optimizer.zero_grad()
+                                d_loss_slm = torch.zeros_like(d_loss_slm)
+                                should_run_discriminator = False
+                    if not should_run_discriminator:
+                        if not torch.isfinite(loss_gen_lm).all():
+                            _log_rank_debug(
+                                accelerator,
+                                'Skipping slm_generator update because loss is non-finite',
+                            )
                             optimizer.zero_grad()
                             loss_gen_lm = torch.zeros_like(loss_gen_lm)
-                            d_loss_slm = torch.zeros_like(d_loss_slm)
+                        else:
+                            optimizer.zero_grad()
+                            accelerator.backward(loss_gen_lm)
+
+                            total_norm = {}
+                            for key in model.keys():
+                                total_norm[key] = 0
+                                parameters = [p for p in model[key].parameters() if p.grad is not None and p.requires_grad]
+                                for p in parameters:
+                                    param_norm = p.grad.detach().data.norm(2)
+                                    if torch.isnan(param_norm) or torch.isinf(param_norm):
+                                        continue
+                                    total_norm[key] += param_norm.item() ** 2
+                                total_norm[key] = total_norm[key] ** 0.5
+
+                            grad_ok = _validate_gradients(
+                                accelerator,
+                                (
+                                    ('bert_encoder', model.get('bert_encoder')),
+                                    ('bert', model.get('bert')),
+                                    ('predictor', model.get('predictor')),
+                                    ('diffusion', model.get('diffusion')),
+                                ),
+                                'slm_generator',
+                                clip_norm=gradient_clip_norm,
+                            )
+
+                            if grad_ok:
+                                predictor_norm = total_norm.get('predictor', 0.0)
+                                if math.isfinite(predictor_norm) and predictor_norm > slmadv_params.thresh:
+                                    scale = 1 / max(predictor_norm, 1e-12)
+                                    for key in model.keys():
+                                        for p in model[key].parameters():
+                                            if p.grad is not None:
+                                                p.grad *= scale
+
+                                for p in predictor_module.duration_proj.parameters():
+                                    if p.grad is not None:
+                                        p.grad *= slmadv_params.scale
+
+                                for p in predictor_module.lstm.parameters():
+                                    if p.grad is not None:
+                                        p.grad *= slmadv_params.scale
+
+                                for p in model.diffusion.parameters():
+                                    if p.grad is not None:
+                                        p.grad *= slmadv_params.scale
+
+                                optimizer.step('bert_encoder')
+                                optimizer.step('bert')
+                                optimizer.step('predictor')
+                                optimizer.step('diffusion')
+                            else:
+                                optimizer.zero_grad()
+                                loss_gen_lm = torch.zeros_like(loss_gen_lm)
+                                d_loss_slm = torch.zeros_like(d_loss_slm)
                 if slm_out is None:
                     should_run_discriminator = False
 
