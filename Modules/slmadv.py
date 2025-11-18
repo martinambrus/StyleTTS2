@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import math
 
 
 def _clone_if_grad(tensor, *, force=False):
@@ -281,10 +282,28 @@ class SLMAdversarialLoss(torch.nn.Module):
             
         # generator loss
         gen_loss = self.wl.generator(y_pred.squeeze())
-        
+
         gen_loss = gen_loss.mean()
-        
-        return d_loss, gen_loss, y_pred.detach().cpu().numpy()
+
+        if isinstance(d_loss, torch.Tensor):
+            d_loss = torch.nan_to_num(d_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            if not math.isfinite(float(d_loss)):
+                d_loss = 0.0
+
+        if isinstance(gen_loss, torch.Tensor):
+            gen_loss = torch.nan_to_num(gen_loss, nan=0.0, posinf=0.0, neginf=0.0)
+        else:
+            if not math.isfinite(float(gen_loss)):
+                gen_loss = 0.0
+
+        if isinstance(y_pred, torch.Tensor):
+            y_pred = torch.nan_to_num(y_pred, nan=0.0, posinf=0.0, neginf=0.0)
+            y_pred_out = y_pred.detach().cpu().numpy()
+        else:
+            y_pred_out = y_pred
+
+        return d_loss, gen_loss, y_pred_out
     
 def length_to_mask(lengths):
     mask = torch.arange(lengths.max()).unsqueeze(0).expand(lengths.shape[0], -1).type_as(lengths)
