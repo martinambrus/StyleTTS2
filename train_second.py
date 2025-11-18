@@ -1,3 +1,11 @@
+import os
+
+import runtime_cuda_compat
+
+import torch
+
+runtime_cuda_compat.disable_cuda_jit_features_if_available()
+
 from torch.utils.tensorboard import SummaryWriter
 from meldataset import build_dataloader
 from Utils.PLBERT.util import load_plbert
@@ -25,11 +33,9 @@ from accelerate.logging import get_logger
 from torch.nn.utils import clip_grad_norm_
 
 import logging
-import os
 import yaml
 import time
 import numpy as np
-import torch
 import click
 import shutil
 import traceback

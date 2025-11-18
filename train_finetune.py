@@ -1,3 +1,11 @@
+import os
+
+import runtime_cuda_compat
+
+import torch
+
+runtime_cuda_compat.disable_cuda_jit_features_if_available()
+
 # load packages
 from munch import Munch
 from torch.utils.tensorboard import SummaryWriter
@@ -13,12 +21,10 @@ from optimizers import build_optimizer
 
 import copy
 import logging
-import os
 import random
 import yaml
 import time
 import numpy as np
-import torch
 import torch.nn.functional as F
 import click
 import shutil

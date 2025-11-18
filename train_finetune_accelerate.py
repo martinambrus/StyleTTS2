@@ -1,11 +1,17 @@
 import copy
 import os
+
+import runtime_cuda_compat
+
+import torch
+
+runtime_cuda_compat.disable_cuda_jit_features_if_available()
+
 import random
 import yaml
 import time
 from munch import Munch
 import numpy as np
-import torch
 import torch.nn.functional as F
 import click
 import shutil

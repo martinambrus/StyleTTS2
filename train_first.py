@@ -1,3 +1,11 @@
+import os
+
+import runtime_cuda_compat
+
+import torch
+
+runtime_cuda_compat.disable_cuda_jit_features_if_available()
+
 from munch import Munch
 from monotonic_align import mask_from_lens
 from meldataset import build_dataloader
@@ -19,13 +27,11 @@ from accelerate import Accelerator
 from accelerate import DistributedDataParallelKwargs
 from torch.utils.tensorboard import SummaryWriter
 from accelerate.logging import get_logger
-import os
 import shutil
 import click
 import random
 import yaml
 import numpy as np
-import torch
 import torch.nn.functional as F
 import time
 import logging
